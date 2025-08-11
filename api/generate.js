@@ -50,35 +50,54 @@ function extractVisibleText(html) {
   return $('body').text().replace(/\s+/g, ' ').trim()
 }
 
+/**
+ * Crawl home + depth-1 same-origin pages.
+ * Returns: { text: string, hrefs: string[] }
+ * We don't fetch off-origin pages; we only read their hrefs (e.g., social links).
+ */
 async function crawl(rootUrl) {
   const start = new URL(rootUrl)
   const visited = new Set()
   const queue = [start.href]
   const texts = []
+  const hrefs = []
 
   while (queue.length) {
     const current = queue.shift()
     if (visited.has(current)) continue
     visited.add(current)
+
     try {
       const html = await fetchHtml(current)
-      const text = extractVisibleText(html)
-      if (text) texts.push(text)
       const $ = cheerio.load(html)
+
+      // text
+      $('script, style, noscript, svg, iframe').remove()
+      const t = $('body').text().replace(/\s+/g, ' ').trim()
+      if (t) texts.push(t)
+
+      // collect anchors (for social detection)
       $('a[href]').each((_, el) => {
+        const href = $(el).attr('href')
+        if (!href) return
         try {
-          const href = $(el).attr('href')
-          if (!href) return
           const abs = new URL(href, start.href)
-          if (!sameOrigin(start, abs)) return
-          if (pathLevel(abs) <= 1) {
+          hrefs.push(abs.href)
+
+          // enqueue only same-origin, depth <= 1
+          if (sameOrigin(start, abs) && pathLevel(abs) <= 1) {
             if (!visited.has(abs.href) && queue.length < 25) queue.push(abs.href)
           }
-        } catch {}
+        } catch {
+          // ignore bad hrefs
+        }
       })
-    } catch {}
+    } catch {
+      // ignore per-page failures
+    }
   }
-  return texts.join('\n\n')
+
+  return { text: texts.join('\n\n'), hrefs }
 }
 
 async function callOpenAI(systemPrompt, userPrompt) {
@@ -187,12 +206,7 @@ function normalizeHours(raw) {
 }
 /* -------------------------------------------------------------------- */
 
-/* ---------------- Address extraction (cleaned & stricter) ----------------
-  - Disallow 5-digit "street numbers" (prevents ZIP leading matches)
-  - Repair split words (St reet -> Street, Hartfo rd -> Hartford, Dr ive, etc.)
-  - Insert space between Suite/Unit/# and glued city word (e.g., "#A-2Hartford" -> "#A-2 Hartford")
-  - Limit street block words and require a known street type near the number
--------------------------------------------------------------------------- */
+/* ---------------- Address extraction (cleaned & stricter) ---------------- */
 const STREET_TYPES = [
   'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr','Lane','Ln','Court','Ct','Circle','Cir',
   'Way','Parkway','Pkwy','Place','Pl','Terrace','Ter','Highway','Hwy','Route','Rte','Trail','Trl','Center','Ctr'
@@ -214,7 +228,7 @@ function preCleanText(corpus) {
   // Remove common nav/control phrases around addresses
   t = t.replace(NAV_NOISE_RE, ' ')
 
-  // Fix common split words (caused by line-break flatten merge)
+  // Fix split words
   const fixPairs = [
     [/S\s*t\s*reet/gi, 'Street'],
     [/A\s*v\s*e\s*n\s*ue/gi, 'Avenue'],
@@ -238,7 +252,7 @@ function preCleanText(corpus) {
   ]
   for (const [re, rep] of fixPairs) t = t.replace(re, rep)
 
-  // Insert a space if a suite token is glued to a City word (capitalized)
+  // Insert space if suite token glues to City word
   t = t.replace(/(Suite|Ste|Unit|Apt|#)\s*([A-Za-z0-9\-]+)(?=[A-Z][a-z])/g, '$1 $2 ')
 
   // Normalize whitespace
@@ -256,12 +270,11 @@ function titleCaseCity(s='') {
 const STREET_BLOCK =
   String.raw`(?:[A-Za-z0-9'&.-]+(?:\s+[A-Za-z0-9'&.-]+){0,5}\s+(?:${STREET_TYPES_RE})\.?)(?:\s*(?:,?\s*(?:Suite|Ste|Unit|Apt|#)\s*[A-Za-z0-9\-]+))?`
 
-// IMPORTANT: street number is 1–4 digits (avoid 5‑digit ZIPs as street numbers)
 const ADDRESS_RE = new RegExp(
-  String.raw`\b(\d{1,4})\s+(${STREET_BLOCK})\s*,?\s*` +   // line1 pieces (no 5‑digit numbers)
-  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +                // city (allow missing comma)
-  String.raw`([A-Z]{2})\s+` +                              // state
-  String.raw`(\d{5}(?:-\d{4})?)\b`,                        // ZIP
+  String.raw`\b(\d{1,4})\s+(${STREET_BLOCK})\s*,?\s*` +
+  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +
+  String.raw`([A-Z]{2})\s+` +
+  String.raw`(\d{5}(?:-\d{4})?)\b`,
   'g'
 )
 
@@ -351,6 +364,82 @@ function extractPhones(corpus) {
 }
 /* ------------------------------------------------------------------------- */
 
+/* ---------------- Social media URL extraction ----------------
+We examine all <a href> links found on the crawled pages (same-origin pages only).
+We DO allow off-origin links when OUTPUTTING (e.g., facebook.com), but we never crawl them.
+We skip "share"/"intent" links and only keep profile/page/channel URLs.
+---------------------------------------------------------------- */
+const SOCIAL_SITES = [
+  { key: 'Facebook', hosts: ['facebook.com','fb.com'], exclude: ['sharer.php','share','dialog/feed'] },
+  { key: 'Instagram', hosts: ['instagram.com'], exclude: [] },
+  { key: 'LinkedIn', hosts: ['linkedin.com'], exclude: ['shareArticle','sharing'] },
+  { key: 'X', hosts: ['x.com','twitter.com'], exclude: ['intent','share'] },
+  { key: 'TikTok', hosts: ['tiktok.com'], exclude: [] },
+  { key: 'YouTube', hosts: ['youtube.com'], exclude: ['share'], allowHostsExtra: ['youtu.be'] },
+  { key: 'Vimeo', hosts: ['vimeo.com'], exclude: [] },
+  { key: 'Flickr', hosts: ['flickr.com'], exclude: [] },
+  { key: 'Foursquare', hosts: ['foursquare.com'], exclude: [] },
+  { key: 'Threads', hosts: ['threads.net','threads.com'], exclude: [] },
+  { key: 'Tumblr', hosts: ['tumblr.com'], exclude: [] }
+]
+
+function normalizeUrl(u) {
+  try {
+    const url = new URL(u)
+    url.hash = '' // drop fragments
+    return url.toString()
+  } catch { return '' }
+}
+
+function hostMatches(hostname, hosts = []) {
+  const h = (hostname || '').toLowerCase()
+  return hosts.some(dom => h === dom || h.endsWith('.' + dom))
+}
+
+function pathExcluded(pathname, excludes = []) {
+  const p = (pathname || '').toLowerCase()
+  return excludes.some(x => p.includes(x.toLowerCase()))
+}
+
+function extractSocialMediaUrls(allHrefs = []) {
+  const found = new Map() // key -> url (first seen)
+  for (const raw of allHrefs) {
+    const u = normalizeUrl(raw)
+    if (!u) continue
+    let parsed
+    try { parsed = new URL(u) } catch { continue }
+    // Skip mailto/tel/javascript/etc
+    if (!/^https?:$/.test(parsed.protocol)) continue
+
+    for (const site of SOCIAL_SITES) {
+      const allHosts = site.allowHostsExtra ? site.hosts.concat(site.allowHostsExtra) : site.hosts
+      if (!hostMatches(parsed.hostname, allHosts)) continue
+      if (pathExcluded(parsed.pathname, site.exclude)) continue
+
+      // Heuristics: avoid completely generic root share links with no path content
+      const path = parsed.pathname || '/'
+      if (path === '/' || path === '/home' || path === '/share') continue
+
+      // First come, first served per platform
+      if (!found.has(site.key)) {
+        found.set(site.key, parsed.toString())
+      }
+    }
+  }
+
+  if (found.size === 0) return 'None'
+
+  // Output lines in fixed order defined by SOCIAL_SITES
+  const lines = []
+  for (const site of SOCIAL_SITES) {
+    if (found.has(site.key)) {
+      lines.push(`${site.key}: ${found.get(site.key)}`)
+    }
+  }
+  return lines.join('\n')
+}
+/* ------------------------------------------------------------------------- */
+
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end()
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
@@ -368,7 +457,10 @@ export default async function handler(req, res) {
       return res.status(400).send('Please enter a valid URL.')
     }
 
-    const corpus = await crawl(parsed.href)
+    const crawled = await crawl(parsed.href)
+    const corpus = crawled.text
+    const hrefs = crawled.hrefs
+
     if (!corpus || corpus.length < 40) {
       return res.status(422).send('Could not extract enough content from the provided site.')
     }
@@ -471,9 +563,10 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
       description = sanitize(description)
     }
 
-    // Extract addresses & phone numbers
+    // Structured extractions
     const addresses = extractAddresses(corpus)
     const phoneNumbers = extractPhones(corpus)
+    const socialMediaUrls = extractSocialMediaUrls(hrefs)
 
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
@@ -484,7 +577,8 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
       productsAndServices,
       hoursOfOperation,
       addresses,
-      phoneNumbers
+      phoneNumbers,
+      socialMediaUrls
     }))
   } catch (err) {
     const code = err.statusCode || 500
