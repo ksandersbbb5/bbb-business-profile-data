@@ -34,7 +34,19 @@ export default function UrlForm({ onSubmit, loading, value, onChange, inputRef }
       {clientError && (
         <div style={{ color: 'red', marginTop: 8 }}>{clientError}</div>
       )}
-      <button type="submit" disabled={loading} style={{ marginTop: 12, padding: '10px 14px', borderRadius: 8, border: '1px solid #333', background: '#111', color: '#fff', cursor: loading ? 'wait' : 'pointer' }}>
+      <button
+        type="submit"
+        disabled={loading}
+        style={{
+          marginTop: 12,
+          padding: '10px 14px',
+          borderRadius: 8,
+          border: 'none',
+          background: '#00965E',
+          color: '#fff',
+          cursor: loading ? 'wait' : 'pointer'
+        }}
+      >
         {loading ? 'Generating…' : 'Generate'}
       </button>
     </form>
