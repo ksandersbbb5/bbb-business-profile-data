@@ -56,8 +56,8 @@ export default function App() {
           style={{ height: 40, width: 40, objectFit: 'contain' }}
         />
         <div>
-          <h1 style={{ fontSize: 28, margin: 0 }}>Generate a Description Overview for a BBB Business Profile</h1>
-          <p style={{ color: '#444', margin: 0 }}>This will generate the text of the BBB Business Profile Description Overview, also known as About This Business.</p>
+         <h1 style={{ fontSize: 28, margin: 0 }}>Obtain Information from Businesses Website for their BBB B
+          <p style={{ color: '#444', margin: 0 }}>This will generate the text of the BBB Business Profile Description Overview, also known as About This Business.  It will also genersate data for Owner Demographic and Social Media URLs, Hours of Operation, Phone Number(s), Address for the business and License Information from the information on their website. </p>
         </div>
       </div>
 
