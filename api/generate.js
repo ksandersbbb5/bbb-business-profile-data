@@ -1,10 +1,8 @@
-// api/generate.js
 import * as cheerio from 'cheerio'
 
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
-// --- helpers ---
 async function readJsonBody(req) {
   if (req.body && typeof req.body === 'object') return req.body
   const chunks = []
@@ -14,12 +12,15 @@ async function readJsonBody(req) {
 }
 
 const ALLOWED_CLIENT_BASE = new Set([
-  'residential',
-  'commercial',
-  'residential and commercial',
-  'government',
-  'non-profit'
+  'residential', 'commercial', 'residential and commercial', 'government', 'non-profit'
 ])
+
+const OWNER_DEMOGRAPHIC_CATEGORIES = [
+  'Asian American Owned', 'Black/African American Owned', 'African American Owned', 'Black Owned',
+  'Disabled Owned', 'Employee Owned Owned', 'Family Owned', 'Family-Owned', 'First Responder Owned',
+  'Hispanic Owned', 'Indigenous Owned', 'LBGTQ Owned', 'Middle Eastern Owned', 'Minority Owned',
+  'Native American Owned', 'Pacific Owned', 'Veteran Owned', 'Woman Owned'
+]
 
 const BANNED_PHRASES = [
   'warranties','warranty','guarantee','guaranteed','quality','needs','free','reliable','premier','expert','experts','best','unique','peace of mind','largest','top','selection','ultimate','consultation','skilled','known for','prominent','paid out','commitment','Experts at','Experts in','Cost effective','cost saving','Ensuring efficiency','Best at','best in','Ensuring','Excels','Rely on us',
@@ -87,20 +88,14 @@ async function callOpenAI(systemPrompt, userPrompt) {
     err.statusCode = 500
     throw err
   }
-  const body = {
-    model: MODEL,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    temperature: 0.2
-  }
+  const body = { model: MODEL, messages: [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt }
+  ], temperature: 0.2 }
+
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENAI_API_KEY}`
-    },
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
     body: JSON.stringify(body)
   })
   if (!res.ok) {
@@ -117,6 +112,11 @@ function enforceClientBase(value) {
   const v = (value || '').trim().toLowerCase()
   return ALLOWED_CLIENT_BASE.has(v) ? v : 'residential'
 }
+function enforceOwnerDemographic(value) {
+  if (!value) return 'None'
+  const match = OWNER_DEMOGRAPHIC_CATEGORIES.find(c => c.toLowerCase() === value.trim().toLowerCase())
+  return match || 'None'
+}
 function stripExcluded(text) {
   let t = text || ''
   t = t.replace(/https?:\S+/g, '')
@@ -127,39 +127,6 @@ function stripExcluded(text) {
   NEVER.forEach(p => { t = t.replace(new RegExp(p, 'gi'), '') })
   return t
 }
-
-/* ---------------- Owner Demographic (exact match only) ---------------- */
-const OWNER_CATEGORIES = [
-  'Asian American Owned',
-  'Black/African American Owned',
-  'African American Owned',
-  'Black Owned',
-  'Disabled Owned',
-  'Employee Owned Owned',
-  'Family Owned',
-  'Family-Owned',
-  'First Responder Owned',
-  'Hispanic Owned',
-  'Indigenous Owned',
-  'LBGTQ Owned',
-  'Middle Eastern Owned',
-  'Minority Owned',
-  'Native American Owned',
-  'Pacific Owned',
-  'Veteran Owned',
-  'Woman Owned'
-]
-
-// Case-insensitive exact phrase match; any non-exact content returns 'None'
-function detectOwnerDemographic(text = '') {
-  for (const label of OWNER_CATEGORIES) {
-    const escaped = label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
-    const re = new RegExp(`\\b${escaped}\\b`, 'i')
-    if (re.test(text)) return label
-  }
-  return 'None'
-}
-/* --------------------------------------------------------------------- */
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end()
@@ -184,67 +151,58 @@ export default async function handler(req, res) {
     }
 
     const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
-Strictly follow these rules when writing the Business Description.
 INFORMATION SOURCE: Use ONLY the provided website content.
-EXCLUSIONS: Do not reference other businesses in the industry. Exclude owner names, locations, hours of operation, and time-related information. Avoid the characters * [ ].
-DO NOT INCLUDE: the text “Business Description” or any variation; the phrase “for more information visit their website…” or any variation; links to any websites; promotional words/phrases; any wording implying trust/endorsement/popularity.
-GENERAL GUIDELINES: Max 900 characters; factual; no advertising claims, business history, or storytelling.
-TEMPLATE: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."
-OUTPUT: JSON with keys description (string) and clientBase (one of: residential, commercial, residential and commercial, government, non-profit). Do not add extra keys. Write the description in plain text complying with all constraints.`
+OUTPUT FORMAT: JSON with keys:
+- description: string (<=900 chars, plain text, factual, no promotional tone)
+- clientBase: one of [residential, commercial, residential and commercial, government, non-profit]
+- ownerDemographic: exact match from list or "None"
+- productsAndServices: factual categories, 1–4 words each, separated by commas, or "None" if not found.
+
+RULES:
+- description: No marketing terms, no promotional phrases, no location/time, no external business refs, no owner names, no "*[]", no “Business Description” text.
+- clientBase: pick one from allowed list.
+- ownerDemographic: exact match from list provided; case-insensitive; else "None".
+- productsAndServices: short factual category names only, no numbering/bullets, no service areas, exclude banned items: Free Shipping, Quality Assurance, Product Warranty, Customer Service, Extra Services, Prunes.
+- If no products/services found, output "None".`
 
     const userPrompt = `Website URL: ${parsed.href}
-
-WEBSITE CONTENT (verbatim, may be long):
+WEBSITE CONTENT:
 
 ${corpus}
 
-IMPORTANT: Ensure your description (<=900 chars) contains no promotional language and no forbidden words/characters. Determine clientBase from the content and sentiment, choosing exactly one of the allowed options.`
+Follow the rules strictly.`
 
     let aiRaw = await callOpenAI(systemPrompt, userPrompt)
 
-    // Parse JSON (be tolerant)
     let payload
     try {
       const jsonMatch = aiRaw.match(/\{[\s\S]*\}$/)
       payload = JSON.parse(jsonMatch ? jsonMatch[0] : aiRaw)
     } catch {
-      const fix = await callOpenAI(
-        'Return ONLY valid JSON with keys description and clientBase, nothing else.',
-        `Please convert the following into strict JSON: ${aiRaw}`
-      )
+      const fix = await callOpenAI('Return ONLY valid JSON.', `Fix this to valid JSON: ${aiRaw}`)
       payload = JSON.parse(fix)
     }
 
-    let description = String(payload.description || '')
+    let description = sanitize(stripExcluded(payload.description || ''))
     let clientBase = enforceClientBase(payload.clientBase)
+    let ownerDemographic = enforceOwnerDemographic(payload.ownerDemographic)
+    let productsAndServices = payload.productsAndServices || 'None'
 
-    description = stripExcluded(description)
     if (badWordPresent(description)) {
       const neutral = await callOpenAI(
-        'Neutralize promotional language and remove forbidden words/characters. Return ONLY the text, <=900 chars.',
+        'Neutralize promotional language and remove forbidden words. Return ONLY the text, <=900 chars.',
         description
       )
-      description = neutral
+      description = sanitize(neutral)
     }
-    description = sanitize(description)
-
-    if (badWordPresent(description)) {
-      for (const p of BANNED_PHRASES) {
-        const re = new RegExp(p, 'gi')
-        description = description.replace(re, '')
-      }
-      description = sanitize(description)
-    }
-
-    // NEW: detect Owner Demographic from the scraped corpus (exact match only)
-    const ownerDemographic = detectOwnerDemographic(corpus)
 
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
       url: parsed.href,
       description,
       clientBase,
-      ownerDemographic
+      ownerDemographic,
+      productsAndServices
     }))
   } catch (err) {
     const code = err.statusCode || 500
