@@ -122,10 +122,17 @@ export default function App() {
             </pre>
           </div>
 
-          <div>
+          <div style={{ marginBottom: 16 }}>
             <strong>Address(es):</strong><br />
             <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
               {result.addresses}
+            </pre>
+          </div>
+
+          <div>
+            <strong>Phone Number(s):</strong><br />
+            <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
+              {result.phoneNumbers}
             </pre>
           </div>
         </div>
