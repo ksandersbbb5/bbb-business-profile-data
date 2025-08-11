@@ -115,10 +115,17 @@ export default function App() {
             <span>{result.productsAndServices}</span>
           </div>
 
-          <div>
+          <div style={{ marginBottom: 16 }}>
             <strong>Hours of Operation:</strong><br />
             <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
               {result.hoursOfOperation}
+            </pre>
+          </div>
+
+          <div>
+            <strong>Address(es):</strong><br />
+            <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
+              {result.addresses}
             </pre>
           </div>
         </div>
