@@ -66,7 +66,6 @@ export default function App() {
         value={url}
         onChange={setUrl}
         inputRef={inputRef}
-        buttonStyle={{ backgroundColor: '#00965E', color: '#fff', border: 'none' }}
       />
 
       {/* Start Again */}
@@ -93,23 +92,34 @@ export default function App() {
             <strong>Website URL:</strong><br />
             <span>{result.url}</span>
           </div>
+
           <div style={{ marginBottom: 16 }}>
             <strong>Business Description:</strong>
             <p style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>
               {result.description} {`The business provides services to ${result.clientBase} customers.`}
             </p>
           </div>
+
           <div style={{ marginBottom: 16 }}>
             <strong>Client Base:</strong><br />
             <span>{result.clientBase}</span>
           </div>
+
           <div style={{ marginBottom: 16 }}>
             <strong>Owner Demographic:</strong><br />
             <span>{result.ownerDemographic}</span>
           </div>
-          <div>
+
+          <div style={{ marginBottom: 16 }}>
             <strong>Products and Services:</strong><br />
             <span>{result.productsAndServices}</span>
+          </div>
+
+          <div>
+            <strong>Hours of Operation:</strong><br />
+            <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
+              {result.hoursOfOperation}
+            </pre>
           </div>
         </div>
       )}
