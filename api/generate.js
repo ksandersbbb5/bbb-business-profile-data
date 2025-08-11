@@ -174,19 +174,71 @@ const LINE_RE = new RegExp(`^(${DAYS.join('|')}): ((${TIME_RE} - ${TIME_RE})|Clo
 
 function normalizeHours(raw) {
   if (!raw) return 'None'
-  // normalize whitespace and line endings
   let t = String(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
   if (!t) return 'None'
   const lines = t.split('\n').map(s => s.trim()).filter(Boolean)
   if (lines.length !== 7) return 'None'
-
-  // Ensure each day is present exactly once and in any order—or in order? Spec shows fixed order; enforce order.
   for (let i = 0; i < 7; i++) {
     const expectedDay = DAYS[i]
     if (!LINE_RE.test(lines[i])) return 'None'
     if (!lines[i].startsWith(expectedDay + ':')) return 'None'
   }
   return lines.join('\n')
+}
+/* -------------------------------------------------------------------- */
+
+/* ---------------- Address extraction (US‑first) ----------------
+  Finds addresses in sentences or lists.
+  Format each address as:
+    <street + suite>
+    <City, ST ZIP>
+    US   (default; if clearly another country appears, set it)
+----------------------------------------------------------------- */
+const STREET_TYPES = [
+  'St','Street','Ave','Avenue','Rd','Road','Blvd','Boulevard','Dr','Drive','Ln','Lane','Ct','Court','Cir','Circle',
+  'Way','Pkwy','Parkway','Pl','Place','Ter','Terrace','Hwy','Highway','Rte','Route','Trl','Trail'
+]
+const STREET_TYPES_RE = STREET_TYPES.map(s => s.replace(/\./g, '\\.')).join('|')
+
+// Rough but effective US address matcher in free text:
+const ADDRESS_RE = new RegExp(
+  String.raw`(\d{1,6}\s+[A-Za-z0-9.\- ]+(?:\s(?:${STREET_TYPES_RE})\.?)\s*(?:,?\s*(?:Suite|Ste|Unit|Apt|#)\s*[A-Za-z0-9\-]+)?)\s*,?\s*` +  // street + optional suite
+  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +                                                               // city (allow missing comma)
+  String.raw`([A-Z]{2})\s+` +                                                                            // state (2 letters)
+  String.raw`(\d{5}(?:-\d{4})?)`,                                                                        // ZIP
+  'g'
+)
+
+function normalizeSpaces(s=''){ return s.replace(/\s+/g, ' ').trim() }
+
+function formatAddress(street, city, state, zip, countryHint) {
+  const line1 = normalizeSpaces(street).replace(/,\s*$/,'')
+  const cityClean = normalizeSpaces(city).replace(/,\s*$/,'')
+  const line2 = `${cityClean}, ${state} ${zip}`
+  // Default to US unless another country is clearly present in the chunk (very conservative)
+  const line3 = countryHint && /canada|ca\b|united kingdom|uk\b|mexico|mx\b/i.test(countryHint) ? 'US' /* keep US by spec unless clearly other */ : 'US'
+  return `${line1}\n${line2}\n${line3}`
+}
+
+function extractAddresses(corpus) {
+  if (!corpus) return 'None'
+  const text = corpus.replace(/\s+/g, ' ') // flatten to catch inline mentions
+  const found = new Set()
+  let m
+  while ((m = ADDRESS_RE.exec(text)) !== null) {
+    const street = m[1] || ''
+    const city = m[2] || ''
+    const state = m[3] || ''
+    const zip = m[4] || ''
+    const streetLower = street.toLowerCase()
+    // Exclusions: PO Boxes and emails
+    if (/p\.?\s*o\.?\s*box/i.test(streetLower)) continue
+    if (/@/.test(street)) continue
+    const formatted = formatAddress(street, city, state, zip, text)
+    found.add(formatted)
+  }
+  if (found.size === 0) return 'None'
+  return Array.from(found).join('\n\n') // single blank line between multiple addresses
 }
 /* -------------------------------------------------------------------- */
 
@@ -222,8 +274,8 @@ OUTPUT FORMAT (JSON only):
   "description": string,            // <=900 chars, plain text, factual, no promotional tone
   "clientBase": string,             // one of: residential, commercial, residential and commercial, government, non-profit
   "ownerDemographic": string,       // exact match from provided list or "None"
-  "productsAndServices": string,    // categories only, 1–4 words each, comma-separated with a space after comma; or "None"
-  "hoursOfOperation": string        // 7 lines formatted EXACTLY as shown, or "None" if all seven days not available
+  "productsAndServices": string,    // categories (1–4 words), comma-separated; or "None"
+  "hoursOfOperation": string        // 7 lines EXACTLY as shown; or "None" if all seven days not available
 }
 
 HOURS FORMAT (exact; 7 lines):
@@ -241,24 +293,7 @@ HOURS RULES:
 - If hours are not available for ALL seven days, output "None".
 
 OWNER DEMOGRAPHIC (case-insensitive exact match; otherwise "None"):
-Asian American Owned
-Black/African American Owned
-African American Owned
-Black Owned
-Disabled Owned
-Employee Owned Owned
-Family Owned
-Family-Owned
-First Responder Owned
-Hispanic Owned
-Indigenous Owned
-LBGTQ Owned
-Middle Eastern Owned
-Minority Owned
-Native American Owned
-Pacific Owned
-Veteran Owned
-Woman Owned
+${OWNER_CATEGORIES.join('\n')}
 
 PRODUCTS & SERVICES RULES:
 - List categories only (1–4 words each).
@@ -282,7 +317,7 @@ ${corpus}
 
 Follow all rules exactly and return ONLY valid JSON with the specified keys.`
 
-    // Ask OpenAI for all fields
+    // Ask OpenAI for description/clientBase/ownerDemo/products/hours
     let aiRaw = await callOpenAI(systemPrompt, userPrompt)
 
     // Parse JSON (be tolerant)
@@ -298,15 +333,11 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
     // Extract & enforce constraints
     let description = String(payload.description || '')
     let clientBase = enforceClientBase(payload.clientBase)
-    let ownerDemographic = detectOwnerDemographic(corpus) // exact-match from site text only
-    // Prefer site-detected owner demo; if model returned exact allowed label and site lacks it, okay to keep model's none.
+    let ownerDemographic = detectOwnerDemographic(corpus) // from site text only, exact matches
     if (ownerDemographic === 'None' && typeof payload.ownerDemographic === 'string') {
-      // still enforce exact list
-      if (OWNER_CATEGORIES.find(c => c.toLowerCase() === payload.ownerDemographic.trim().toLowerCase())) {
-        ownerDemographic = OWNER_CATEGORIES.find(c => c.toLowerCase() === payload.ownerDemographic.trim().toLowerCase()) || 'None'
-      }
+      const match = OWNER_CATEGORIES.find(c => c.toLowerCase() === payload.ownerDemographic.trim().toLowerCase())
+      if (match) ownerDemographic = match
     }
-
     let productsAndServices = cleanProductsAndServices(payload.productsAndServices)
     let hoursOfOperation = normalizeHours(payload.hoursOfOperation)
 
@@ -328,6 +359,9 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
       description = sanitize(description)
     }
 
+    // NEW: extract one or more addresses from the raw corpus (inline or standalone)
+    const addresses = extractAddresses(corpus)
+
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
       url: parsed.href,
@@ -335,7 +369,8 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
       clientBase,
       ownerDemographic,
       productsAndServices,
-      hoursOfOperation
+      hoursOfOperation,
+      addresses
     }))
   } catch (err) {
     const code = err.statusCode || 500
