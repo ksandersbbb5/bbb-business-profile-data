@@ -129,10 +129,17 @@ export default function App() {
             </pre>
           </div>
 
-          <div>
+          <div style={{ marginBottom: 16 }}>
             <strong>Phone Number(s):</strong><br />
             <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
               {result.phoneNumbers}
+            </pre>
+          </div>
+
+          <div>
+            <strong>Social Media URLs:</strong><br />
+            <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
+              {result.socialMediaUrls}
             </pre>
           </div>
         </div>
