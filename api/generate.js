@@ -1,14 +1,12 @@
+// api/generate.js
 import * as cheerio from 'cheerio'
-
 
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
 // --- helpers ---
 async function readJsonBody(req) {
-  // If Vercel already parsed it:
   if (req.body && typeof req.body === 'object') return req.body
-  // Otherwise read raw body:
   const chunks = []
   for await (const c of req) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c))
   const raw = Buffer.concat(chunks).toString('utf8') || '{}'
@@ -130,6 +128,39 @@ function stripExcluded(text) {
   return t
 }
 
+/* ---------------- Owner Demographic (exact match only) ---------------- */
+const OWNER_CATEGORIES = [
+  'Asian American Owned',
+  'Black/African American Owned',
+  'African American Owned',
+  'Black Owned',
+  'Disabled Owned',
+  'Employee Owned Owned',
+  'Family Owned',
+  'Family-Owned',
+  'First Responder Owned',
+  'Hispanic Owned',
+  'Indigenous Owned',
+  'LBGTQ Owned',
+  'Middle Eastern Owned',
+  'Minority Owned',
+  'Native American Owned',
+  'Pacific Owned',
+  'Veteran Owned',
+  'Woman Owned'
+]
+
+// Case-insensitive exact phrase match; any non-exact content returns 'None'
+function detectOwnerDemographic(text = '') {
+  for (const label of OWNER_CATEGORIES) {
+    const escaped = label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
+    const re = new RegExp(`\\b${escaped}\\b`, 'i')
+    if (re.test(text)) return label
+  }
+  return 'None'
+}
+/* --------------------------------------------------------------------- */
+
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end()
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
@@ -205,8 +236,16 @@ IMPORTANT: Ensure your description (<=900 chars) contains no promotional languag
       description = sanitize(description)
     }
 
+    // NEW: detect Owner Demographic from the scraped corpus (exact match only)
+    const ownerDemographic = detectOwnerDemographic(corpus)
+
     res.setHeader('Content-Type', 'application/json')
-    return res.status(200).send(JSON.stringify({ url: parsed.href, description, clientBase }))
+    return res.status(200).send(JSON.stringify({
+      url: parsed.href,
+      description,
+      clientBase,
+      ownerDemographic
+    }))
   } catch (err) {
     const code = err.statusCode || 500
     return res.status(code).send(err.message || 'Internal Server Error')
