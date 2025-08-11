@@ -64,7 +64,6 @@ async function crawl(rootUrl) {
       const html = await fetchHtml(current)
       const text = extractVisibleText(html)
       if (text) texts.push(text)
-
       const $ = cheerio.load(html)
       $('a[href]').each((_, el) => {
         try {
@@ -188,15 +187,11 @@ function normalizeHours(raw) {
 }
 /* -------------------------------------------------------------------- */
 
-/* ---------------- Address extraction (US‑first, cleaned) ----------------
-  Fixes issues like "St reet" and removes nav noise (e.g., "Change Address").
-  Matches:
-    <number> <name> <StreetType> [Suite/Unit]
-    City, ST ZIP
-  Then formats as:
-    Line1: Street + suite
-    Line2: City, ST ZIP
-    Line3: US
+/* ---------------- Address extraction (cleaned & stricter) ----------------
+  - Disallow 5-digit "street numbers" (prevents ZIP leading matches)
+  - Repair split words (St reet -> Street, Hartfo rd -> Hartford, Dr ive, etc.)
+  - Insert space between Suite/Unit/# and glued city word (e.g., "#A-2Hartford" -> "#A-2 Hartford")
+  - Limit street block words and require a known street type near the number
 -------------------------------------------------------------------------- */
 const STREET_TYPES = [
   'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr','Lane','Ln','Court','Ct','Circle','Cir',
@@ -212,27 +207,14 @@ const NAV_NOISE_RE = new RegExp(
   'gi'
 )
 
-// limit the street block to avoid gobbling random words far away
-const STREET_BLOCK =
-  String.raw`(?:[A-Za-z0-9'&.-]+(?:\s+[A-Za-z0-9'&.-]+){0,5}\s+(?:${STREET_TYPES_RE})\.?)(?:\s*(?:,?\s*(?:Suite|Ste|Unit|Apt|#)\s*[A-Za-z0-9\-]+))?`
-
-// strict address: number + limited street block + city + state + zip
-const ADDRESS_RE = new RegExp(
-  String.raw`\b(\d{1,6})\s+(${STREET_BLOCK})\s*,?\s*` +      // line1 pieces
-  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +                   // city (allow missing comma)
-  String.raw`([A-Z]{2})\s+` +                                 // state
-  String.raw`(\d{5}(?:-\d{4})?)\b`,                           // ZIP
-  'g'
-)
-
 function preCleanText(corpus) {
   if (!corpus) return ''
   let t = corpus
 
-  // Remove common nav/control phrases that appear before addresses
+  // Remove common nav/control phrases around addresses
   t = t.replace(NAV_NOISE_RE, ' ')
 
-  // Collapse broken street words e.g., "St reet" -> "Street"
+  // Fix common split words (caused by line-break flatten merge)
   const fixPairs = [
     [/S\s*t\s*reet/gi, 'Street'],
     [/A\s*v\s*e\s*n\s*ue/gi, 'Avenue'],
@@ -251,27 +233,54 @@ function preCleanText(corpus) {
     [/S\s*u\s*i\s*t\s*e/gi, 'Suite'],
     [/U\s*n\s*i\s*t/gi, 'Unit'],
     [/A\s*p\s*t/gi, 'Apt'],
+    [/H\s*a\s*r\s*t\s*f\s*o\s*r\s*d/gi, 'Hartford'],
+    [/N\s*e\s*w\s*\s*W\s*i\s*n\s*d\s*s\s*o\s*r/gi, 'New Windsor']
   ]
   for (const [re, rep] of fixPairs) t = t.replace(re, rep)
 
-  // Remove excessive whitespace; keep single spaces so regex sees inline addresses
+  // Insert a space if a suite token is glued to a City word (capitalized)
+  t = t.replace(/(Suite|Ste|Unit|Apt|#)\s*([A-Za-z0-9\-]+)(?=[A-Z][a-z])/g, '$1 $2 ')
+
+  // Normalize whitespace
   t = t.replace(/\s+/g, ' ').trim()
   return t
 }
 
+function titleCaseCity(s='') {
+  return s
+    .split(/\s+/)
+    .map(w => w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w)
+    .join(' ')
+}
+
+const STREET_BLOCK =
+  String.raw`(?:[A-Za-z0-9'&.-]+(?:\s+[A-Za-z0-9'&.-]+){0,5}\s+(?:${STREET_TYPES_RE})\.?)(?:\s*(?:,?\s*(?:Suite|Ste|Unit|Apt|#)\s*[A-Za-z0-9\-]+))?`
+
+// IMPORTANT: street number is 1–4 digits (avoid 5‑digit ZIPs as street numbers)
+const ADDRESS_RE = new RegExp(
+  String.raw`\b(\d{1,4})\s+(${STREET_BLOCK})\s*,?\s*` +   // line1 pieces (no 5‑digit numbers)
+  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +                // city (allow missing comma)
+  String.raw`([A-Z]{2})\s+` +                              // state
+  String.raw`(\d{5}(?:-\d{4})?)\b`,                        // ZIP
+  'g'
+)
+
 function normalizeSpaces(s=''){ return s.replace(/\s+/g, ' ').trim() }
 
-function formatAddress(line1Name, streetBlock, city, state, zip) {
-  const line1 = normalizeSpaces(`${line1Name} ${streetBlock}`).replace(/,\s*$/, '')
-  const line2 = `${normalizeSpaces(city).replace(/,\s*$/,'')}, ${state} ${zip}`
-  const line3 = 'US' // default per spec unless clearly other; we keep US
+function formatAddress(num, streetBlock, city, state, zip) {
+  const line1 = normalizeSpaces(`${num} ${streetBlock}`).replace(/,\s*$/, '')
+  const cityClean = titleCaseCity(normalizeSpaces(city).replace(/,\s*$/, ''))
+  const line2 = `${cityClean}, ${state.toUpperCase()} ${zip}`
+  const line3 = 'US'
   return `${line1}\n${line2}\n${line3}`
 }
 
 function extractAddresses(corpus) {
   if (!corpus) return 'None'
   const text = preCleanText(corpus)
-  const found = new Set()
+  const seen = new Set()
+  const out = []
+
   let m
   while ((m = ADDRESS_RE.exec(text)) !== null) {
     const num = m[1] || ''
@@ -280,17 +289,18 @@ function extractAddresses(corpus) {
     const state = m[4] || ''
     const zip = m[5] || ''
 
-    // exclude PO Boxes / emails in the captured block (extra safety)
     const line1Raw = `${num} ${streetBlock}`
     if (/p\.?\s*o\.?\s*box/i.test(line1Raw)) continue
     if (/@/.test(line1Raw)) continue
 
     const formatted = formatAddress(num, streetBlock, city, state, zip)
-    const key = formatted.toLowerCase().replace(/\s+/g,' ')
-    if (!found.has(key)) found.add(key)
+    const key = formatted.toLowerCase().replace(/\s+/g, ' ')
+    if (!seen.has(key)) {
+      seen.add(key)
+      out.push(formatted)
+    }
   }
-  if (found.size === 0) return 'None'
-  return Array.from(found).join('\n\n') // single blank line between addresses
+  return out.length ? out.join('\n\n') : 'None'
 }
 /* -------------------------------------------------------------------- */
 
@@ -461,7 +471,7 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
       description = sanitize(description)
     }
 
-    // Extract addresses & phone numbers from cleaned/raw corpus
+    // Extract addresses & phone numbers
     const addresses = extractAddresses(corpus)
     const phoneNumbers = extractPhones(corpus)
 
