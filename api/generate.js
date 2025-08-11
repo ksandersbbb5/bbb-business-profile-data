@@ -188,95 +188,144 @@ function normalizeHours(raw) {
 }
 /* -------------------------------------------------------------------- */
 
-/* ---------------- Address extraction (US‑first) ---------------- */
+/* ---------------- Address extraction (US‑first, cleaned) ----------------
+  Fixes issues like "St reet" and removes nav noise (e.g., "Change Address").
+  Matches:
+    <number> <name> <StreetType> [Suite/Unit]
+    City, ST ZIP
+  Then formats as:
+    Line1: Street + suite
+    Line2: City, ST ZIP
+    Line3: US
+-------------------------------------------------------------------------- */
 const STREET_TYPES = [
-  'St','Street','Ave','Avenue','Rd','Road','Blvd','Boulevard','Dr','Drive','Ln','Lane','Ct','Court','Cir','Circle',
-  'Way','Pkwy','Parkway','Pl','Place','Ter','Terrace','Hwy','Highway','Rte','Route','Trl','Trail'
+  'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr','Lane','Ln','Court','Ct','Circle','Cir',
+  'Way','Parkway','Pkwy','Place','Pl','Terrace','Ter','Highway','Hwy','Route','Rte','Trail','Trl','Center','Ctr'
 ]
 const STREET_TYPES_RE = STREET_TYPES.map(s => s.replace(/\./g, '\\.')).join('|')
 
+const NAV_NOISE_RE = new RegExp(
+  '\\b(' + [
+    'Change Address','Location Info','Areas Served','Make Payment','Request Service','View locations',
+    'Reviews','Careers','Contact Us','Northern New England','Southern New England','About Us'
+  ].join('|') + ')\\b',
+  'gi'
+)
+
+// limit the street block to avoid gobbling random words far away
+const STREET_BLOCK =
+  String.raw`(?:[A-Za-z0-9'&.-]+(?:\s+[A-Za-z0-9'&.-]+){0,5}\s+(?:${STREET_TYPES_RE})\.?)(?:\s*(?:,?\s*(?:Suite|Ste|Unit|Apt|#)\s*[A-Za-z0-9\-]+))?`
+
+// strict address: number + limited street block + city + state + zip
 const ADDRESS_RE = new RegExp(
-  String.raw`(\d{1,6}\s+[A-Za-z0-9.\- ]+(?:\s(?:${STREET_TYPES_RE})\.?)\s*(?:,?\s*(?:Suite|Ste|Unit|Apt|#)\s*[A-Za-z0-9\-]+)?)\s*,?\s*` +
-  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +
-  String.raw`([A-Z]{2})\s+` +
-  String.raw`(\d{5}(?:-\d{4})?)`,
+  String.raw`\b(\d{1,6})\s+(${STREET_BLOCK})\s*,?\s*` +      // line1 pieces
+  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +                   // city (allow missing comma)
+  String.raw`([A-Z]{2})\s+` +                                 // state
+  String.raw`(\d{5}(?:-\d{4})?)\b`,                           // ZIP
   'g'
 )
 
+function preCleanText(corpus) {
+  if (!corpus) return ''
+  let t = corpus
+
+  // Remove common nav/control phrases that appear before addresses
+  t = t.replace(NAV_NOISE_RE, ' ')
+
+  // Collapse broken street words e.g., "St reet" -> "Street"
+  const fixPairs = [
+    [/S\s*t\s*reet/gi, 'Street'],
+    [/A\s*v\s*e\s*n\s*ue/gi, 'Avenue'],
+    [/B\s*o\s*u\s*l\s*e\s*v\s*a\s*r\s*d/gi, 'Boulevard'],
+    [/D\s*r\s*ive/gi, 'Drive'],
+    [/R\s*o\s*a\s*d/gi, 'Road'],
+    [/L\s*a\s*n\s*e/gi, 'Lane'],
+    [/C\s*o\s*u\s*r\s*t/gi, 'Court'],
+    [/C\s*i\s*r\s*c\s*l\s*e/gi, 'Circle'],
+    [/P\s*a\s*r\s*k\s*w\s*a\s*y/gi, 'Parkway'],
+    [/T\s*e\s*r\s*r\s*a\s*c\s*e/gi, 'Terrace'],
+    [/T\s*r\s*a\s*i\s*l/gi, 'Trail'],
+    [/H\s*i\s*g\s*h\s*w\s*a\s*y/gi, 'Highway'],
+    [/R\s*o\s*u\s*t\s*e/gi, 'Route'],
+    [/C\s*e\s*n\s*t\s*e\s*r/gi, 'Center'],
+    [/S\s*u\s*i\s*t\s*e/gi, 'Suite'],
+    [/U\s*n\s*i\s*t/gi, 'Unit'],
+    [/A\s*p\s*t/gi, 'Apt'],
+  ]
+  for (const [re, rep] of fixPairs) t = t.replace(re, rep)
+
+  // Remove excessive whitespace; keep single spaces so regex sees inline addresses
+  t = t.replace(/\s+/g, ' ').trim()
+  return t
+}
+
 function normalizeSpaces(s=''){ return s.replace(/\s+/g, ' ').trim() }
-function formatAddress(street, city, state, zip, countryHint) {
-  const line1 = normalizeSpaces(street).replace(/,\s*$/,'')
-  const cityClean = normalizeSpaces(city).replace(/,\s*$/,'')
-  const line2 = `${cityClean}, ${state} ${zip}`
-  const line3 = 'US' // default to US per spec unless clearly other (we keep US)
+
+function formatAddress(line1Name, streetBlock, city, state, zip) {
+  const line1 = normalizeSpaces(`${line1Name} ${streetBlock}`).replace(/,\s*$/, '')
+  const line2 = `${normalizeSpaces(city).replace(/,\s*$/,'')}, ${state} ${zip}`
+  const line3 = 'US' // default per spec unless clearly other; we keep US
   return `${line1}\n${line2}\n${line3}`
 }
+
 function extractAddresses(corpus) {
   if (!corpus) return 'None'
-  const text = corpus.replace(/\s+/g, ' ')
+  const text = preCleanText(corpus)
   const found = new Set()
   let m
   while ((m = ADDRESS_RE.exec(text)) !== null) {
-    const street = m[1] || ''
-    const city = m[2] || ''
-    const state = m[3] || ''
-    const zip = m[4] || ''
-    if (/p\.?\s*o\.?\s*box/i.test(street)) continue
-    if (/@/.test(street)) continue
-    found.add(formatAddress(street, city, state, zip, text))
+    const num = m[1] || ''
+    const streetBlock = m[2] || ''
+    const city = m[3] || ''
+    const state = m[4] || ''
+    const zip = m[5] || ''
+
+    // exclude PO Boxes / emails in the captured block (extra safety)
+    const line1Raw = `${num} ${streetBlock}`
+    if (/p\.?\s*o\.?\s*box/i.test(line1Raw)) continue
+    if (/@/.test(line1Raw)) continue
+
+    const formatted = formatAddress(num, streetBlock, city, state, zip)
+    const key = formatted.toLowerCase().replace(/\s+/g,' ')
+    if (!found.has(key)) found.add(key)
   }
   if (found.size === 0) return 'None'
-  return Array.from(found).join('\n\n')
+  return Array.from(found).join('\n\n') // single blank line between addresses
 }
 /* -------------------------------------------------------------------- */
 
-/* ---------------- Phone extraction (US only, format + ext) ----------------
-Accepts:
-  781-324-9408, (781) 324-9408, 781.324.9408, 781 324 9408, 7813249408
-Rules:
-  - Reformat to (XXX) XXX-XXXX
-  - Extension patterns: x123, ext 123, ext. 123, extension 123  -> "ext. 123"
-  - Skip international (+1) and numbers labeled as fax
-  - Multiple numbers -> one per line; none -> "None"
-------------------------------------------------------------------------- */
+/* ---------------- Phone extraction (US only, format + ext) ---------------- */
 const PHONE_CANDIDATE =
   /(?<!\+)(?:\(\s*\d{3}\s*\)\s*\d{3}[\s\.-]?\d{4}|\d{3}[\s\.-]?\d{3}[\s\.-]?\d{4}|\b\d{10}\b)/g
 const EXT_PATTERN = /(ext\.?|x|extension)\s*[:#\-]?\s*(\d{1,6})/i
 
 function formatPhone(digits) {
-  // digits: 10 numbers
   return `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`
 }
-
 function extractPhones(corpus) {
   if (!corpus) return 'None'
   const text = corpus.replace(/\r/g,' ').replace(/\n/g,' ')
   const results = []
   const seen = new Set()
-
   let m
   while ((m = PHONE_CANDIDATE.exec(text)) !== null) {
     const raw = m[0]
     const idx = m.index
 
     // Skip if nearby "fax"
-    const ctxStart = Math.max(0, idx - 12)
-    const ctxEnd = Math.min(text.length, idx + raw.length + 12)
+    const ctxStart = Math.max(0, idx - 16)
+    const ctxEnd = Math.min(text.length, idx + raw.length + 16)
     const ctx = text.slice(ctxStart, ctxEnd)
-    if (/fax\b/i.test(ctx)) continue
+    if (/\bfax\b/i.test(ctx)) continue
 
-    // Strip non-digits
     let digits = raw.replace(/\D/g, '')
-
-    // Handle 11-digit starting with 1 (but not +1; we already excluded with lookbehind)
     if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1)
-
-    if (digits.length !== 10) continue // enforce US 10-digit
+    if (digits.length !== 10) continue
 
     let formatted = formatPhone(digits)
 
-    // Look ahead for extension within the next ~20 chars
-    const tail = text.slice(idx + raw.length, Math.min(text.length, idx + raw.length + 32))
+    // extension within small window after match
+    const tail = text.slice(idx + raw.length, Math.min(text.length, idx + raw.length + 40))
     const extMatch = EXT_PATTERN.exec(tail)
     if (extMatch) {
       const extDigits = (extMatch[2] || '').replace(/\D/g,'')
@@ -288,7 +337,6 @@ function extractPhones(corpus) {
       results.push(formatted)
     }
   }
-
   return results.length ? results.join('\n') : 'None'
 }
 /* ------------------------------------------------------------------------- */
@@ -413,7 +461,7 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
       description = sanitize(description)
     }
 
-    // NEW: extract addresses & phone numbers from raw corpus
+    // Extract addresses & phone numbers from cleaned/raw corpus
     const addresses = extractAddresses(corpus)
     const phoneNumbers = extractPhones(corpus)
 
