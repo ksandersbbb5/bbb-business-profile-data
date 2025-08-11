@@ -53,7 +53,6 @@ function extractVisibleText(html) {
 /**
  * Crawl home + depth-1 same-origin pages.
  * Returns: { text: string, hrefs: string[] }
- * We don't fetch off-origin pages; we only read their hrefs (e.g., social links).
  */
 async function crawl(rootUrl) {
   const start = new URL(rootUrl)
@@ -364,11 +363,12 @@ function extractPhones(corpus) {
 }
 /* ------------------------------------------------------------------------- */
 
-/* ---------------- Social media URL extraction ----------------
+/* ---------------- Social media URL extraction (root-only excluded) --------
 We examine all <a href> links found on the crawled pages (same-origin pages only).
-We DO allow off-origin links when OUTPUTTING (e.g., facebook.com), but we never crawl them.
-We skip "share"/"intent" links and only keep profile/page/channel URLs.
----------------------------------------------------------------- */
+We allow off-origin links when OUTPUTTING (e.g., facebook.com), but we never crawl them.
+We skip "share"/"intent" links and any URL that is only the root domain (with or without "/").
+A valid social URL must have at least one non-empty path segment after the domain.
+--------------------------------------------------------------------------- */
 const SOCIAL_SITES = [
   { key: 'Facebook', hosts: ['facebook.com','fb.com'], exclude: ['sharer.php','share','dialog/feed'] },
   { key: 'Instagram', hosts: ['instagram.com'], exclude: [] },
@@ -401,6 +401,14 @@ function pathExcluded(pathname, excludes = []) {
   return excludes.some(x => p.includes(x.toLowerCase()))
 }
 
+function hasAtLeastOnePathSegment(pathname) {
+  // Require at least one non-empty segment after "/"
+  // Exclude "/" or "" and trivial paths like "/ " (after trim)
+  if (!pathname) return false
+  const segs = pathname.split('/').filter(Boolean)
+  return segs.length >= 1
+}
+
 function extractSocialMediaUrls(allHrefs = []) {
   const found = new Map() // key -> url (first seen)
   for (const raw of allHrefs) {
@@ -414,13 +422,19 @@ function extractSocialMediaUrls(allHrefs = []) {
     for (const site of SOCIAL_SITES) {
       const allHosts = site.allowHostsExtra ? site.hosts.concat(site.allowHostsExtra) : site.hosts
       if (!hostMatches(parsed.hostname, allHosts)) continue
-      if (pathExcluded(parsed.pathname, site.exclude)) continue
 
-      // Heuristics: avoid completely generic root share links with no path content
-      const path = parsed.pathname || '/'
-      if (path === '/' || path === '/home' || path === '/share') continue
+      const pathname = parsed.pathname || '/'
 
-      // First come, first served per platform
+      // Exclude share/intent/etc paths
+      if (pathExcluded(pathname, site.exclude)) continue
+
+      // Exclude root-only domains: require at least one segment (e.g., "/username")
+      if (!hasAtLeastOnePathSegment(pathname)) continue
+
+      // Heuristics: still skip extremely generic placeholders
+      const firstSeg = pathname.split('/').filter(Boolean)[0]?.toLowerCase() || ''
+      if (['home','share'].includes(firstSeg)) continue
+
       if (!found.has(site.key)) {
         found.set(site.key, parsed.toString())
       }
