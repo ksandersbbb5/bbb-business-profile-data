@@ -21,7 +21,6 @@ export default function App() {
       })
       if (!res.ok) {
         const text = await res.text()
-        // Preserve helpful validation errors; friendlify everything else
         if (res.status === 400 || res.status === 422) {
           throw new Error(text || 'Please check the website URL and try again.')
         } else {
@@ -47,20 +46,15 @@ export default function App() {
 
   return (
     <div style={{ maxWidth: 860, margin: '40px auto', padding: '0 16px', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
-      {/* Header with BBB logo top-left */}
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-        <img
-          src="/bbb-logo.png"
-          alt="BBB logo"
-          style={{ height: 40, width: 40, objectFit: 'contain' }}
-        />
+        <img src="/bbb-logo.png" alt="BBB logo" style={{ height: 40, width: 40, objectFit: 'contain' }} />
         <div>
           <h1 style={{ fontSize: 28, margin: 0 }}>
             Obtain Information from Businesses Website for their BBB Business Profile
           </h1>
           <p style={{ color: '#444', margin: 0 }}>
-            This will generate the text of the BBB Business Profile Description Overview, also known as About This Business.
-            It will also generate data for Owner Demographic (exact-match categories) and other fields you add over time.
+            Generates the BBB Business Profile Description Overview and additional data points.
           </p>
         </div>
       </div>
@@ -72,9 +66,10 @@ export default function App() {
         value={url}
         onChange={setUrl}
         inputRef={inputRef}
+        buttonStyle={{ backgroundColor: '#00965E', color: '#fff', border: 'none' }}
       />
 
-      {/* Actions row */}
+      {/* Start Again */}
       <div style={{ marginTop: 12 }}>
         <button
           type="button"
@@ -87,14 +82,9 @@ export default function App() {
       </div>
 
       {/* Errors */}
-      {error && (
-        <div style={{ color: 'red', marginTop: 16 }}>{error}</div>
-      )}
+      {error && <div style={{ color: 'red', marginTop: 16 }}>{error}</div>}
 
-      {/* Loading */}
-      {loading && (
-        <div style={{ marginTop: 16 }}>Processing…</div>
-      )}
+      {loading && <div style={{ marginTop: 16 }}>Processing…</div>}
 
       {/* Results */}
       {result && (
@@ -103,23 +93,23 @@ export default function App() {
             <strong>Website URL:</strong><br />
             <span>{result.url}</span>
           </div>
-
           <div style={{ marginBottom: 16 }}>
             <strong>Business Description:</strong>
             <p style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>
               {result.description} {`The business provides services to ${result.clientBase} customers.`}
             </p>
           </div>
-
           <div style={{ marginBottom: 16 }}>
             <strong>Client Base:</strong><br />
             <span>{result.clientBase}</span>
           </div>
-
-          {/* New: Owner Demographic */}
-          <div>
+          <div style={{ marginBottom: 16 }}>
             <strong>Owner Demographic:</strong><br />
             <span>{result.ownerDemographic}</span>
+          </div>
+          <div>
+            <strong>Products and Services:</strong><br />
+            <span>{result.productsAndServices}</span>
           </div>
         </div>
       )}
