@@ -363,12 +363,7 @@ function extractPhones(corpus) {
 }
 /* ------------------------------------------------------------------------- */
 
-/* ---------------- Social media URL extraction (root-only excluded) --------
-We examine all <a href> links found on the crawled pages (same-origin pages only).
-We allow off-origin links when OUTPUTTING (e.g., facebook.com), but we never crawl them.
-We skip "share"/"intent" links and any URL that is only the root domain (with or without "/").
-A valid social URL must have at least one non-empty path segment after the domain.
---------------------------------------------------------------------------- */
+/* ---------------- Social media URL extraction (root-only excluded) -------- */
 const SOCIAL_SITES = [
   { key: 'Facebook', hosts: ['facebook.com','fb.com'], exclude: ['sharer.php','share','dialog/feed'] },
   { key: 'Instagram', hosts: ['instagram.com'], exclude: [] },
@@ -390,33 +385,26 @@ function normalizeUrl(u) {
     return url.toString()
   } catch { return '' }
 }
-
 function hostMatches(hostname, hosts = []) {
   const h = (hostname || '').toLowerCase()
   return hosts.some(dom => h === dom || h.endsWith('.' + dom))
 }
-
 function pathExcluded(pathname, excludes = []) {
   const p = (pathname || '').toLowerCase()
   return excludes.some(x => p.includes(x.toLowerCase()))
 }
-
 function hasAtLeastOnePathSegment(pathname) {
-  // Require at least one non-empty segment after "/"
-  // Exclude "/" or "" and trivial paths like "/ " (after trim)
-  if (!pathname) return false
-  const segs = pathname.split('/').filter(Boolean)
+  const segs = (pathname || '').split('/').filter(Boolean)
   return segs.length >= 1
 }
 
 function extractSocialMediaUrls(allHrefs = []) {
-  const found = new Map() // key -> url (first seen)
+  const found = new Map()
   for (const raw of allHrefs) {
     const u = normalizeUrl(raw)
     if (!u) continue
     let parsed
     try { parsed = new URL(u) } catch { continue }
-    // Skip mailto/tel/javascript/etc
     if (!/^https?:$/.test(parsed.protocol)) continue
 
     for (const site of SOCIAL_SITES) {
@@ -425,177 +413,10 @@ function extractSocialMediaUrls(allHrefs = []) {
 
       const pathname = parsed.pathname || '/'
 
-      // Exclude share/intent/etc paths
       if (pathExcluded(pathname, site.exclude)) continue
-
-      // Exclude root-only domains: require at least one segment (e.g., "/username")
       if (!hasAtLeastOnePathSegment(pathname)) continue
 
-      // Heuristics: still skip extremely generic placeholders
       const firstSeg = pathname.split('/').filter(Boolean)[0]?.toLowerCase() || ''
       if (['home','share'].includes(firstSeg)) continue
 
-      if (!found.has(site.key)) {
-        found.set(site.key, parsed.toString())
-      }
-    }
-  }
-
-  if (found.size === 0) return 'None'
-
-  // Output lines in fixed order defined by SOCIAL_SITES
-  const lines = []
-  for (const site of SOCIAL_SITES) {
-    if (found.has(site.key)) {
-      lines.push(`${site.key}: ${found.get(site.key)}`)
-    }
-  }
-  return lines.join('\n')
-}
-/* ------------------------------------------------------------------------- */
-
-export default async function handler(req, res) {
-  if (req.method === 'OPTIONS') return res.status(204).end()
-  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
-
-  try {
-    const body = await readJsonBody(req)
-    const { url } = body || {}
-    if (!url) return res.status(400).send('Missing url')
-
-    let parsed
-    try {
-      parsed = new URL(url)
-      if (!/^https?:$/.test(parsed.protocol)) throw new Error('bad protocol')
-    } catch {
-      return res.status(400).send('Please enter a valid URL.')
-    }
-
-    const crawled = await crawl(parsed.href)
-    const corpus = crawled.text
-    const hrefs = crawled.hrefs
-
-    if (!corpus || corpus.length < 40) {
-      return res.status(422).send('Could not extract enough content from the provided site.')
-    }
-
-    const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
-
-INFORMATION SOURCE:
-Use ONLY the provided website content.
-
-OUTPUT FORMAT (JSON only):
-{
-  "description": string,            // <=900 chars, plain text, factual, no promotional tone
-  "clientBase": string,             // one of: residential, commercial, residential and commercial, government, non-profit
-  "ownerDemographic": string,       // exact match from provided list or "None"
-  "productsAndServices": string,    // categories (1–4 words), comma-separated; or "None"
-  "hoursOfOperation": string        // 7 lines EXACTLY as shown; or "None" if all seven days not available
-}
-
-HOURS FORMAT (exact; 7 lines):
-Monday: 09:00 AM - 05:00 PM
-Tuesday: 09:00 AM - 05:00 PM
-Wednesday: 09:00 AM - 05:00 PM
-Thursday: 09:00 AM - 05:00 PM
-Friday: 09:00 AM - 05:00 PM
-Saturday: Closed
-Sunday: Closed
-
-HOURS RULES:
-- 12-hour time with "AM"/"PM".
-- Use "Closed" when not open.
-- If hours are not available for ALL seven days, output "None".
-
-OWNER DEMOGRAPHIC (case-insensitive exact match; otherwise "None"):
-${OWNER_CATEGORIES.join('\n')}
-
-PRODUCTS & SERVICES RULES:
-- List categories only (1–4 words each).
-- Comma-separated (", ") with NO numbering or bullets.
-- Factual, neutral tone; no service areas.
-- If none found, return "None".
-- Exclude and do not output these (or variations): Free Shipping, Quality Assurance, Product Warranty, Customer Service, Extra Services, Prunes.
-
-DESCRIPTION RULES:
-- No promotional language or implied endorsements.
-- No owner names, locations, hours, or time-related info.
-- No references to other businesses.
-- Do not use characters * [ ].
-- Do NOT include the literal text "Business Description".`
-
-    const userPrompt = `Website URL: ${parsed.href}
-
-WEBSITE CONTENT (verbatim, may be long):
-
-${corpus}
-
-Follow all rules exactly and return ONLY valid JSON with the specified keys.`
-
-    // Ask OpenAI for description/clientBase/ownerDemo/products/hours
-    let aiRaw = await callOpenAI(systemPrompt, userPrompt)
-
-    // Parse JSON (be tolerant)
-    let payload
-    try {
-      const jsonMatch = aiRaw.match(/\{[\s\S]*\}$/)
-      payload = JSON.parse(jsonMatch ? jsonMatch[0] : aiRaw)
-    } catch {
-      const fix = await callOpenAI('Return ONLY valid JSON with keys description, clientBase, ownerDemographic, productsAndServices, hoursOfOperation. Nothing else.', `Please convert the following into strict JSON: ${aiRaw}`)
-      payload = JSON.parse(fix)
-    }
-
-    // Extract & enforce constraints
-    let description = String(payload.description || '')
-    let clientBase = enforceClientBase(payload.clientBase)
-
-    // Owner demographic — prefer exact matches from site text; fall back to model if exact label
-    let ownerDemographic = detectOwnerDemographic(corpus)
-    if (ownerDemographic === 'None' && typeof payload.ownerDemographic === 'string') {
-      const match = OWNER_CATEGORIES.find(c => c.toLowerCase() === payload.ownerDemographic.trim().toLowerCase())
-      if (match) ownerDemographic = match
-    }
-
-    let productsAndServices = cleanProductsAndServices(payload.productsAndServices)
-    let hoursOfOperation = normalizeHours(payload.hoursOfOperation)
-
-    // Description sanitization
-    description = stripExcluded(description)
-    if (badWordPresent(description)) {
-      const neutral = await callOpenAI(
-        'Neutralize promotional language and remove forbidden words/characters. Return ONLY the text, <=900 chars.',
-        description
-      )
-      description = neutral
-    }
-    description = sanitize(description)
-    if (badWordPresent(description)) {
-      for (const p of BANNED_PHRASES) {
-        const re = new RegExp(p, 'gi')
-        description = description.replace(re, '')
-      }
-      description = sanitize(description)
-    }
-
-    // Structured extractions
-    const addresses = extractAddresses(corpus)
-    const phoneNumbers = extractPhones(corpus)
-    const socialMediaUrls = extractSocialMediaUrls(hrefs)
-
-    res.setHeader('Content-Type', 'application/json')
-    return res.status(200).send(JSON.stringify({
-      url: parsed.href,
-      description,
-      clientBase,
-      ownerDemographic,
-      productsAndServices,
-      hoursOfOperation,
-      addresses,
-      phoneNumbers,
-      socialMediaUrls
-    }))
-  } catch (err) {
-    const code = err.statusCode || 500
-    return res.status(code).send(err.message || 'Internal Server Error')
-  }
-}
+     
