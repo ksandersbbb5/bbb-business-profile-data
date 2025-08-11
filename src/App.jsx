@@ -42,7 +42,6 @@ export default function App() {
     setUrl('')
     setResult(null)
     setError('')
-    // focus the input for fast re-entry
     if (inputRef.current) inputRef.current.focus()
   }
 
@@ -56,8 +55,13 @@ export default function App() {
           style={{ height: 40, width: 40, objectFit: 'contain' }}
         />
         <div>
-         <h1 style={{ fontSize: 28, margin: 0 }}>Obtain Information from Businesses Website for their BBB B
-          <p style={{ color: '#444', margin: 0 }}>This will generate the text of the BBB Business Profile Description Overview, also known as About This Business.  It will also genersate data for Owner Demographic and Social Media URLs, Hours of Operation, Phone Number(s), Address for the business and License Information from the information on their website. </p>
+          <h1 style={{ fontSize: 28, margin: 0 }}>
+            Obtain Information from Businesses Website for their BBB Business Profile
+          </h1>
+          <p style={{ color: '#444', margin: 0 }}>
+            This will generate the text of the BBB Business Profile Description Overview, also known as About This Business.
+            It will also generate data for Owner Demographic (exact-match categories) and other fields you add over time.
+          </p>
         </div>
       </div>
 
@@ -107,9 +111,15 @@ export default function App() {
             </p>
           </div>
 
-          <div>
+          <div style={{ marginBottom: 16 }}>
             <strong>Client Base:</strong><br />
             <span>{result.clientBase}</span>
+          </div>
+
+          {/* New: Owner Demographic */}
+          <div>
+            <strong>Owner Demographic:</strong><br />
+            <span>{result.ownerDemographic}</span>
           </div>
         </div>
       )}
