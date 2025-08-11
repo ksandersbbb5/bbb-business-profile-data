@@ -64,6 +64,7 @@ async function crawl(rootUrl) {
       const html = await fetchHtml(current)
       const text = extractVisibleText(html)
       if (text) texts.push(text)
+
       const $ = cheerio.load(html)
       $('a[href]').each((_, el) => {
         try {
@@ -187,42 +188,32 @@ function normalizeHours(raw) {
 }
 /* -------------------------------------------------------------------- */
 
-/* ---------------- Address extraction (US‑first) ----------------
-  Finds addresses in sentences or lists.
-  Format each address as:
-    <street + suite>
-    <City, ST ZIP>
-    US   (default; if clearly another country appears, set it)
------------------------------------------------------------------ */
+/* ---------------- Address extraction (US‑first) ---------------- */
 const STREET_TYPES = [
   'St','Street','Ave','Avenue','Rd','Road','Blvd','Boulevard','Dr','Drive','Ln','Lane','Ct','Court','Cir','Circle',
   'Way','Pkwy','Parkway','Pl','Place','Ter','Terrace','Hwy','Highway','Rte','Route','Trl','Trail'
 ]
 const STREET_TYPES_RE = STREET_TYPES.map(s => s.replace(/\./g, '\\.')).join('|')
 
-// Rough but effective US address matcher in free text:
 const ADDRESS_RE = new RegExp(
-  String.raw`(\d{1,6}\s+[A-Za-z0-9.\- ]+(?:\s(?:${STREET_TYPES_RE})\.?)\s*(?:,?\s*(?:Suite|Ste|Unit|Apt|#)\s*[A-Za-z0-9\-]+)?)\s*,?\s*` +  // street + optional suite
-  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +                                                               // city (allow missing comma)
-  String.raw`([A-Z]{2})\s+` +                                                                            // state (2 letters)
-  String.raw`(\d{5}(?:-\d{4})?)`,                                                                        // ZIP
+  String.raw`(\d{1,6}\s+[A-Za-z0-9.\- ]+(?:\s(?:${STREET_TYPES_RE})\.?)\s*(?:,?\s*(?:Suite|Ste|Unit|Apt|#)\s*[A-Za-z0-9\-]+)?)\s*,?\s*` +
+  String.raw`([A-Za-z.\- ]{2,}?)\s*,?\s+` +
+  String.raw`([A-Z]{2})\s+` +
+  String.raw`(\d{5}(?:-\d{4})?)`,
   'g'
 )
 
 function normalizeSpaces(s=''){ return s.replace(/\s+/g, ' ').trim() }
-
 function formatAddress(street, city, state, zip, countryHint) {
   const line1 = normalizeSpaces(street).replace(/,\s*$/,'')
   const cityClean = normalizeSpaces(city).replace(/,\s*$/,'')
   const line2 = `${cityClean}, ${state} ${zip}`
-  // Default to US unless another country is clearly present in the chunk (very conservative)
-  const line3 = countryHint && /canada|ca\b|united kingdom|uk\b|mexico|mx\b/i.test(countryHint) ? 'US' /* keep US by spec unless clearly other */ : 'US'
+  const line3 = 'US' // default to US per spec unless clearly other (we keep US)
   return `${line1}\n${line2}\n${line3}`
 }
-
 function extractAddresses(corpus) {
   if (!corpus) return 'None'
-  const text = corpus.replace(/\s+/g, ' ') // flatten to catch inline mentions
+  const text = corpus.replace(/\s+/g, ' ')
   const found = new Set()
   let m
   while ((m = ADDRESS_RE.exec(text)) !== null) {
@@ -230,17 +221,77 @@ function extractAddresses(corpus) {
     const city = m[2] || ''
     const state = m[3] || ''
     const zip = m[4] || ''
-    const streetLower = street.toLowerCase()
-    // Exclusions: PO Boxes and emails
-    if (/p\.?\s*o\.?\s*box/i.test(streetLower)) continue
+    if (/p\.?\s*o\.?\s*box/i.test(street)) continue
     if (/@/.test(street)) continue
-    const formatted = formatAddress(street, city, state, zip, text)
-    found.add(formatted)
+    found.add(formatAddress(street, city, state, zip, text))
   }
   if (found.size === 0) return 'None'
-  return Array.from(found).join('\n\n') // single blank line between multiple addresses
+  return Array.from(found).join('\n\n')
 }
 /* -------------------------------------------------------------------- */
+
+/* ---------------- Phone extraction (US only, format + ext) ----------------
+Accepts:
+  781-324-9408, (781) 324-9408, 781.324.9408, 781 324 9408, 7813249408
+Rules:
+  - Reformat to (XXX) XXX-XXXX
+  - Extension patterns: x123, ext 123, ext. 123, extension 123  -> "ext. 123"
+  - Skip international (+1) and numbers labeled as fax
+  - Multiple numbers -> one per line; none -> "None"
+------------------------------------------------------------------------- */
+const PHONE_CANDIDATE =
+  /(?<!\+)(?:\(\s*\d{3}\s*\)\s*\d{3}[\s\.-]?\d{4}|\d{3}[\s\.-]?\d{3}[\s\.-]?\d{4}|\b\d{10}\b)/g
+const EXT_PATTERN = /(ext\.?|x|extension)\s*[:#\-]?\s*(\d{1,6})/i
+
+function formatPhone(digits) {
+  // digits: 10 numbers
+  return `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`
+}
+
+function extractPhones(corpus) {
+  if (!corpus) return 'None'
+  const text = corpus.replace(/\r/g,' ').replace(/\n/g,' ')
+  const results = []
+  const seen = new Set()
+
+  let m
+  while ((m = PHONE_CANDIDATE.exec(text)) !== null) {
+    const raw = m[0]
+    const idx = m.index
+
+    // Skip if nearby "fax"
+    const ctxStart = Math.max(0, idx - 12)
+    const ctxEnd = Math.min(text.length, idx + raw.length + 12)
+    const ctx = text.slice(ctxStart, ctxEnd)
+    if (/fax\b/i.test(ctx)) continue
+
+    // Strip non-digits
+    let digits = raw.replace(/\D/g, '')
+
+    // Handle 11-digit starting with 1 (but not +1; we already excluded with lookbehind)
+    if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1)
+
+    if (digits.length !== 10) continue // enforce US 10-digit
+
+    let formatted = formatPhone(digits)
+
+    // Look ahead for extension within the next ~20 chars
+    const tail = text.slice(idx + raw.length, Math.min(text.length, idx + raw.length + 32))
+    const extMatch = EXT_PATTERN.exec(tail)
+    if (extMatch) {
+      const extDigits = (extMatch[2] || '').replace(/\D/g,'')
+      if (extDigits) formatted += ` ext. ${extDigits}`
+    }
+
+    if (!seen.has(formatted)) {
+      seen.add(formatted)
+      results.push(formatted)
+    }
+  }
+
+  return results.length ? results.join('\n') : 'None'
+}
+/* ------------------------------------------------------------------------- */
 
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end()
@@ -333,15 +384,18 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
     // Extract & enforce constraints
     let description = String(payload.description || '')
     let clientBase = enforceClientBase(payload.clientBase)
-    let ownerDemographic = detectOwnerDemographic(corpus) // from site text only, exact matches
+
+    // Owner demographic — prefer exact matches from site text; fall back to model if exact label
+    let ownerDemographic = detectOwnerDemographic(corpus)
     if (ownerDemographic === 'None' && typeof payload.ownerDemographic === 'string') {
       const match = OWNER_CATEGORIES.find(c => c.toLowerCase() === payload.ownerDemographic.trim().toLowerCase())
       if (match) ownerDemographic = match
     }
+
     let productsAndServices = cleanProductsAndServices(payload.productsAndServices)
     let hoursOfOperation = normalizeHours(payload.hoursOfOperation)
 
-    // Enforce exclusions / sanitization for description
+    // Description sanitization
     description = stripExcluded(description)
     if (badWordPresent(description)) {
       const neutral = await callOpenAI(
@@ -359,8 +413,9 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
       description = sanitize(description)
     }
 
-    // NEW: extract one or more addresses from the raw corpus (inline or standalone)
+    // NEW: extract addresses & phone numbers from raw corpus
     const addresses = extractAddresses(corpus)
+    const phoneNumbers = extractPhones(corpus)
 
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
@@ -370,7 +425,8 @@ Follow all rules exactly and return ONLY valid JSON with the specified keys.`
       ownerDemographic,
       productsAndServices,
       hoursOfOperation,
-      addresses
+      addresses,
+      phoneNumbers
     }))
   } catch (err) {
     const code = err.statusCode || 500
