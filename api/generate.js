@@ -103,8 +103,6 @@ function extractPhones(text) {
 }
 
 // ====== Addresses (hardened) ======
-
-// Clean up CMS-induced splits like "475\nWashington Street"
 function normalizeAddressBreaks(text) {
   return text
     .replace(/(\d{1,6})\s*\n\s*([A-Za-z])/g, '$1 $2')
@@ -112,22 +110,16 @@ function normalizeAddressBreaks(text) {
     .replace(/,\s*\n\s*/g, ', ')
     .replace(/\|\s*/g, ' ')
 }
-
-// Street types to require
 const STREET_TYPES = [
   'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr',
   'Lane','Ln','Court','Ct','Place','Pl','Parkway','Pkwy','Highway','Hwy',
   'Way','Terrace','Terr','Circle','Cir','Pike'
 ]
 const STREET_TYPES_RE = new RegExp(`\\b(?:${STREET_TYPES.join('|')})\\b`, 'i')
-
-// Obvious nav/boilerplate tokens to reject in the street line
 const NAV_WORDS_RE = /\b(Home|About|Services|Contact|Reviews|Specials|Privacy|Terms|COVID|Update|Name:|Email:|Phone:|Menu)\b/i
 
 function extractAddresses(rawText) {
   const text = normalizeAddressBreaks(rawText)
-
-  // Regex finds: "123 Main St[ ,optional suite] NEWLINE City, ST ZIP"
   const re = new RegExp(
     String.raw`(^|\n)\s*` +
     String.raw`(\d{1,6}\s+[A-Za-z0-9.\-# ]+?)` +
@@ -145,19 +137,15 @@ function extractAddresses(rawText) {
     const state = (m[4] || '').trim()
     const zip = (m[5] || '').trim()
 
-    // Quality gates
     if (!street || !STREET_TYPES_RE.test(street)) continue
     if (NAV_WORDS_RE.test(street)) continue
     const letters = (street.match(/[A-Za-z]/g) || []).length
     if (letters < 3) continue
 
-    // ensure comma before suite/unit if missing
     street = street.replace(/\s+(Suite|Ste|Unit|#)\s*/i, ', $1 ')
-
     const addr = `${street}\n${city}, ${state} ${zip}\nUSA`
     out.push(addr)
   }
-
   return uniq(out)
 }
 
@@ -173,7 +161,6 @@ function canonicalSocialUrl(href) {
     return null
   }
 }
-
 function extractSocialFromPages(pages) {
   const platforms = [
     { key: 'Facebook', hosts: ['facebook.com'], disallow: ['/sharer'] },
@@ -199,7 +186,7 @@ function extractSocialFromPages(pages) {
         const u = new URL(canon)
         const host = u.hostname
         const path = u.pathname
-        if (!path || path === '/') return // require at least one segment
+        if (!path || path === '/') return
         for (const p of platforms) {
           if (p.hosts.some(h => host.endsWith(h))) {
             if (p.disallow && p.disallow.some(bad => path.startsWith(bad))) return
@@ -476,7 +463,7 @@ export default async function handler(req, res) {
     const addresses = extractAddresses(corpus)
     const socialFound = extractSocialFromPages(pages)
     const bbbFound = detectBBBSeal(pages)
-    const lead = detectLeadForm(pages, parsed.href)
+    const lead = detectLeadForm(pages, parsed.href) // << declared once here
 
     const emailAddresses = emails.length ? emails.join('\n') : 'None'
     const phoneNumbers = phones.length ? phones.join('\n') : 'None'
@@ -632,8 +619,7 @@ ${corpus}
     const secs = Math.floor((elapsed % 60000) / 1000)
     const timeTaken = `${mins} minute${mins === 1 ? '' : 's'} ${secs} second${secs === 1 ? '' : 's'}`
 
-    // Lead form (formatted)
-    const lead = detectLeadForm(pages, parsed.href)
+    // Lead form (formatted) — reuse the earlier `lead`
     let leadForm = 'None'
     let leadFormTitle = ''
     let leadFormUrl = ''
@@ -666,7 +652,6 @@ ${corpus}
       serviceArea,
       refundAndExchangePolicy,
 
-      // Lead form fields for UI flexibility
       leadForm,
       leadFormTitle,
       leadFormUrl
