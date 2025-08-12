@@ -1,6 +1,61 @@
 import React, { useState, useRef } from 'react'
 import UrlForm from './components/UrlForm'
 
+/** Turn raw text (with newlines) into JSX with clickable links (and mailto:). */
+function LinkifiedText({ text, pre = false, style = {} }) {
+  if (!text) return null
+  const urlRe = /(https?:\/\/[^\s<>"']+)/gi
+  const emailRe = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g
+
+  // Split by line to preserve the layout like addresses / hours
+  const lines = String(text).split(/\n/)
+
+  const renderSegment = (seg, keyBase) => {
+    // linkify URLs
+    const parts = []
+    let idx = 0
+    seg.replace(urlRe, (m, _1, offset) => {
+      if (offset > idx) parts.push(seg.slice(idx, offset))
+      parts.push(<a key={`${keyBase}-u-${offset}`} href={m} target="_blank" rel="noreferrer">{m}</a>)
+      idx = offset + m.length
+      return m
+    })
+    if (idx < seg.length) parts.push(seg.slice(idx))
+
+    // Now scan each string chunk for emails and wrap them as mailto:
+    const finalParts = []
+    parts.forEach((p, i) => {
+      if (typeof p !== 'string') { finalParts.push(p); return }
+      let j = 0
+      p.replace(emailRe, (m, offset) => {
+        if (offset > j) finalParts.push(p.slice(j, offset))
+        finalParts.push(<a key={`${keyBase}-e-${i}-${offset}`} href={`mailto:${m}`}>{m}</a>)
+        j = offset + m.length
+        return m
+      })
+      if (j < p.length) finalParts.push(p.slice(j))
+    })
+
+    return finalParts
+  }
+
+  return (
+    <div
+      style={{
+        whiteSpace: pre ? 'pre-wrap' : 'normal',
+        fontFamily: 'Arial',
+        ...style
+      }}
+    >
+      {lines.map((line, i) => (
+        <div key={`ln-${i}`} style={{ fontFamily: 'Arial' }}>
+          {renderSegment(line, `l${i}`)}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export default function App() {
   const [url, setUrl] = useState('')
   const [result, setResult] = useState(null)
@@ -49,17 +104,7 @@ export default function App() {
     return (
       <div style={{ marginBottom: 22 }}>
         <strong style={{ fontSize: 17, display: 'block', fontFamily: 'Arial' }}>{label}</strong>
-        {pre ? (
-          <pre style={{
-            fontFamily: 'Arial',
-            fontSize: 15,
-            margin: 0,
-            whiteSpace: 'pre-line',
-            ...(style || {})
-          }}>{value}</pre>
-        ) : (
-          <div style={{ fontFamily: 'Arial', fontSize: 15, marginTop: 2, ...(style || {}) }}>{value}</div>
-        )}
+        <LinkifiedText text={value} pre={pre} style={{ fontSize: 15, ...(style || {}) }} />
       </div>
     )
   }
@@ -67,23 +112,6 @@ export default function App() {
   const SealBlock = ({ label, value }) => {
     const isNotFound = typeof value === 'string' && value.toLowerCase().startsWith('not found')
     return <Block label={label} value={value} pre={false} style={isNotFound ? { color: 'red' } : {}} />
-  }
-
-  // Compose the Lead Form display from whichever fields the API returns
-  const renderLeadFormValue = (r) => {
-    if (!r) return null
-    if (r.leadForm && typeof r.leadForm === 'string' && r.leadForm.trim()) {
-      return r.leadForm.trim()
-    }
-    const lines = []
-    if (r.leadFormTitle && String(r.leadFormTitle).trim()) {
-      lines.push(`Lead Form Title: ${String(r.leadFormTitle).trim()}`)
-    }
-    if (r.leadFormUrl && String(r.leadFormUrl).trim()) {
-      lines.push(`Lead Form URL: ${String(r.leadFormUrl).trim()}`)
-    }
-    if (!lines.length) return 'None'
-    return lines.join('\n')
   }
 
   return (
@@ -96,9 +124,7 @@ export default function App() {
           style={{ height: 40, width: 40, objectFit: 'contain' }}
         />
         <div>
-          <h1 style={{ fontSize: 28, margin: 0, fontFamily: 'Arial' }}>
-            Obtain Information from Businesses Website for their BBB Business Profile
-          </h1>
+          <h1 style={{ fontSize: 28, margin: 0, fontFamily: 'Arial' }}>Obtain Information from Businesses Website for their BBB B</h1>
           <p style={{ color: '#444', margin: 0, fontFamily: 'Arial' }}>
             This tool generates the BBB Business Profile Description Overview and additional data points from the business website.
           </p>
@@ -156,9 +182,7 @@ export default function App() {
           <Block label="Time to Generate:" value={result.timeTaken} />
           <Block label="Website URL:" value={result.url} />
 
-          {/* The API already appends "The business provides services to <clientBase> customers." */}
           <Block label="Business Description:" value={result.description} />
-
           <Block label="Client Base:" value={result.clientBase} />
           <Block label="Owner Demographic:" value={result.ownerDemographic} />
           <Block label="Products and Services:" value={result.productsAndServices} />
@@ -171,14 +195,14 @@ export default function App() {
 
           <Block label="License Number(s):" value={result.licenseNumbers} pre />
           <Block label="Methods of Payment:" value={result.methodsOfPayment} />
-
           <SealBlock label="BBB Seal on Website:" value={result.bbbSeal} />
-
           <Block label="Service Area:" value={result.serviceArea} />
           <Block label="Refund and Exchange Policy:" value={result.refundAndExchangePolicy} />
 
-          {/* NEW: Lead Form - Custom RAQ */}
-          <Block label="Lead Form - Custom RAQ:" value={renderLeadFormValue(result)} pre />
+          {/* Lead Form */}
+          {result.leadForm && result.leadForm !== 'None' && (
+            <Block label="Lead Form - Custom RAQ:" value={result.leadForm} pre />
+          )}
         </div>
       )}
     </div>
