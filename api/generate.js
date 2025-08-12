@@ -20,7 +20,7 @@ function pathLevel(u) { return u.pathname.split('/').filter(Boolean).length }
 async function fetchHtml(url) {
   const res = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) BBB Profile Scraper',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) BBB Profile Scraper',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9'
     }
@@ -29,9 +29,10 @@ async function fetchHtml(url) {
   return await res.text()
 }
 
-function extractTextNoScripts(html) {
+function extractVisibleText(html) {
   const $ = cheerio.load(html)
-  $('script, style, noscript, svg, iframe').remove()
+  // keep JSON-LD scripts for separate parsing, but remove other scripts/styles/svg/iframes from visible text
+  $('script:not([type="application/ld+json"]), style, noscript, svg, iframe').remove()
   return $('body').text()
     .replace(/\|/g, ' ')
     .replace(/\r/g, '')
@@ -47,8 +48,8 @@ function extractJsonLd(html) {
     const raw = $(el).contents().text()
     if (!raw) return
     try {
-      const data = JSON.parse(raw)
-      blocks.push(data)
+      const parsed = JSON.parse(raw)
+      blocks.push(parsed)
     } catch {}
   })
   return blocks
@@ -60,62 +61,57 @@ async function crawl(rootUrl) {
   const queue = [start.href]
   const texts = []
   const htmls = []
-  const jsonlds = []
 
-  // up to 30 pages, allow depth 2
   const MAX_PAGES = 30
+  const FALLBACK_SLUGS = [
+    '/about', '/about-us', '/contact', '/contact-us', '/locations', '/hours',
+    '/menu', '/privacy', '/legal', '/store-locator', '/find-us'
+  ]
+
   while (queue.length && htmls.length < MAX_PAGES) {
     const current = queue.shift()
     if (visited.has(current)) continue
     visited.add(current)
     try {
       const html = await fetchHtml(current)
-      htmls.push({ url: current, html })
-
-      const ld = extractJsonLd(html)
-      if (ld.length) jsonlds.push({ url: current, jsonld: ld })
-
-      const text = extractTextNoScripts(html)
+      htmls.push({ url: current, html, jsonld: extractJsonLd(html) })
+      const text = extractVisibleText(html)
       if (text) texts.push(text)
 
+      // enqueue same-origin, depth <= 2
       const $ = cheerio.load(html)
       $('a[href]').each((_, el) => {
-        if (htmls.length >= MAX_PAGES) return
-        const href = $(el).attr('href')
-        if (!href) return
         try {
-          const abs = new URL(href, start.href)
+          const href = $(el).attr('href')
+          if (!href) return
+          const abs = new URL(href, current)
           if (!sameOrigin(start, abs)) return
-          const depth = pathLevel(abs)
-          if (depth <= 2 && !visited.has(abs.href) && queue.length < MAX_PAGES) {
-            queue.push(abs.href)
+          if (pathLevel(abs) <= 2) {
+            if (!visited.has(abs.href) && !queue.includes(abs.href) && htmls.length + queue.length < MAX_PAGES) {
+              queue.push(abs.href)
+            }
           }
         } catch {}
       })
     } catch {}
   }
 
-  // If corpus is very thin, try common slugs
-  const corpus = texts.join('\n\n')
-  const PAGES_SET = new Set(htmls.map(p => p.url))
-  const FALLBACKS = ['about', 'about-us', 'contact', 'locations', 'hours', 'menu', 'store-locator']
-  if (corpus.length < 200) {
-    for (const slug of FALLBACKS) {
-      const url = new URL(`/${slug.replace(/^\//,'')}/`, rootUrl).href
-      if (PAGES_SET.has(url)) continue
+  // If corpus looks thin, try some common slugs
+  if (texts.join('\n\n').length < 200) {
+    for (const slug of FALLBACK_SLUGS) {
       try {
-        const html = await fetchHtml(url)
-        htmls.push({ url, html })
-        const ld = extractJsonLd(html)
-        if (ld.length) jsonlds.push({ url, jsonld: ld })
-        const text = extractTextNoScripts(html)
+        const extra = new URL(slug, rootUrl).href
+        if (visited.has(extra)) continue
+        const html = await fetchHtml(extra)
+        htmls.push({ url: extra, html, jsonld: extractJsonLd(html) })
+        const text = extractVisibleText(html)
         if (text) texts.push(text)
       } catch {}
       if (htmls.length >= MAX_PAGES) break
     }
   }
 
-  return { corpus: texts.join('\n\n'), pages: htmls, jsonldPages: jsonlds }
+  return { corpus: texts.join('\n\n'), pages: htmls }
 }
 
 // ====== Utilities ======
@@ -125,6 +121,88 @@ function ensureHeaderBlocks(str) {
     .replace(/\r/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+// ====== JSON-LD harvesters ======
+function harvestFromJsonLd(pages) {
+  const out = {
+    phones: [],
+    addresses: [],
+    hoursMap: {}, // day -> "Monday: 09:00 AM - 05:00 PM"
+    socials: []
+  }
+  const FULL_DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+
+  const toAmPm = (h, m) => {
+    const H = parseInt(h, 10)
+    const M = parseInt(m || 0, 10)
+    const ampm = H >= 12 ? 'PM' : 'AM'
+    let hh = H % 12; if (hh === 0) hh = 12
+    return `${hh.toString().padStart(2,'0')}:${M.toString().padStart(2,'0')} ${ampm}`
+  }
+
+  for (const { jsonld } of pages) {
+    for (const block of jsonld || []) {
+      const items = Array.isArray(block) ? block : [block]
+      for (const it of items) {
+        const node = it || {}
+        // phones
+        if (typeof node.telephone === 'string') {
+          out.phones.push(node.telephone)
+        }
+        // sameAs (socials)
+        if (Array.isArray(node.sameAs)) {
+          out.socials.push(...node.sameAs)
+        }
+        // addresses
+        const addrs = []
+        if (node.address && typeof node.address === 'object') {
+          addrs.push(node.address)
+        }
+        if (Array.isArray(node.address)) {
+          addrs.push(...node.address)
+        }
+        for (const a of addrs) {
+          try {
+            const line1Parts = []
+            if (a.streetAddress) line1Parts.push(String(a.streetAddress))
+            const line1 = line1Parts.join(' ').replace(/\s{2,}/g, ' ').trim()
+            const city = (a.addressLocality || '').toString().trim()
+            const state = (a.addressRegion || '').toString().trim()
+            const zip = (a.postalCode || '').toString().trim()
+            const country = (a.addressCountry || 'USA').toString().trim()
+            if (line1 && city && state && zip) {
+              out.addresses.push(`${line1}\n${city}, ${state} ${zip}\n${country.toUpperCase() === 'US' ? 'USA' : country}`)
+            }
+          } catch {}
+        }
+        // hours
+        const hrs = node.openingHoursSpecification
+        if (Array.isArray(hrs)) {
+          for (const h of hrs) {
+            try {
+              const days = h.dayOfWeek
+              const opens = h.opens
+              const closes = h.closes
+              if (!days || !opens || !closes) continue
+              const openParts = String(opens).split(':'); const closeParts = String(closes).split(':')
+              const openStr = toAmPm(openParts[0], openParts[1])
+              const closeStr = toAmPm(closeParts[0], closeParts[1])
+              const dayList = Array.isArray(days) ? days : [days]
+              for (let d of dayList) {
+                d = String(d).replace(/^https?:.*\//, '') // schema.org/Monday
+                d = d.charAt(0).toUpperCase() + d.slice(1).toLowerCase()
+                if (FULL_DAYS.includes(d)) {
+                  out.hoursMap[d] = `${d}: ${openStr} - ${closeStr}`
+                }
+              }
+            } catch {}
+          }
+        }
+      }
+    }
+  }
+  return out
 }
 
 // ====== Email ======
@@ -150,7 +228,7 @@ function extractPhones(text) {
   return uniq(out)
 }
 
-// ====== Addresses (regex + JSON-LD) ======
+// ====== Addresses (hardened regex) ======
 
 // Clean up CMS-induced splits like "475\nWashington Street"
 function normalizeAddressBreaks(text) {
@@ -167,14 +245,15 @@ const STREET_TYPES = [
   'Way','Terrace','Terr','Circle','Cir','Pike'
 ]
 const STREET_TYPES_RE = new RegExp(`\\b(?:${STREET_TYPES.join('|')})\\b`, 'i')
-const NAV_WORDS_RE = /\b(Home|About|Services|Contact|Reviews|Specials|Privacy|Terms|COVID|Update|Name:|Email:|Phone:|Menu)\b/i
+const NAV_WORDS_RE = /\b(Home|About|Services|Contact|Reviews|Specials|Privacy|Terms|COVID|Update|Name:|Email:|Phone:|Menu|All rights reserved)\b/i
 
-function extractAddressesFromText(rawText) {
+function extractAddresses(rawText) {
   const text = normalizeAddressBreaks(rawText)
+
   const re = new RegExp(
     String.raw`(^|\n)\s*` +
-    String.raw`(\d{1,6}\s+[A-Za-z0-9.\-# ]+?)` +
-    String.raw`\s+(?:` + STREET_TYPES.join('|') + String.raw`)` +
+    String.raw`(\d{1,6}\s+[A-Za-z0-9.\-# ]+?)\s+` +
+    String.raw`(?:${STREET_TYPES.join('|')})` +
     String.raw`(?:\s*,?\s*(?:Suite|Ste|Unit|#)\s*\w+)?` +
     String.raw`\s*[\n,]\s*` +
     String.raw`([A-Za-z][A-Za-z\s\.'-]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)`
@@ -187,57 +266,17 @@ function extractAddressesFromText(rawText) {
     const city = (m[3] || '').replace(/\s{2,}/g, ' ').trim()
     const state = (m[4] || '').trim()
     const zip = (m[5] || '').trim()
-    if (!street || !STREET_TYPES_RE.test(street) || NAV_WORDS_RE.test(street)) continue
-    if ((street.match(/[A-Za-z]/g) || []).length < 3) continue
+
+    if (!street || !STREET_TYPES_RE.test(street)) continue
+    if (NAV_WORDS_RE.test(street)) continue
+    const letters = (street.match(/[A-Za-z]/g) || []).length
+    if (letters < 3) continue
+
     street = street.replace(/\s+(Suite|Ste|Unit|#)\s*/i, ', $1 ')
     out.push(`${street}\n${city}, ${state} ${zip}\nUSA`)
   }
-  return out
-}
 
-function safeStr(v) { return (v ?? '').toString().trim() }
-function extractAddressesFromJsonLd(jsonldPages) {
-  const out = []
-  for (const { jsonld } of jsonldPages) {
-    const stack = Array.isArray(jsonld) ? jsonld : [jsonld]
-    const flat = []
-    const pushAll = (node) => {
-      if (!node || typeof node !== 'object') return
-      flat.push(node)
-      for (const k of Object.keys(node)) {
-        const v = node[k]
-        if (Array.isArray(v)) v.forEach(pushAll)
-        else if (v && typeof v === 'object') pushAll(v)
-      }
-    }
-    stack.forEach(pushAll)
-
-    for (const node of flat) {
-      const type = (Array.isArray(node['@type']) ? node['@type'].join(',') : node['@type']) || ''
-      if (!/LocalBusiness|Organization|Store|Restaurant|HomeAndConstructionBusiness/i.test(type)) continue
-      const addr = node.address
-      const addrs = Array.isArray(addr) ? addr : [addr]
-      for (const a of addrs) {
-        if (!a || typeof a !== 'object') continue
-        const line1Parts = [safeStr(a.streetAddress)]
-        if (!line1Parts[0]) continue
-        const city = safeStr(a.addressLocality)
-        const state = safeStr(a.addressRegion)
-        const zip = safeStr(a.postalCode)
-        const country = (safeStr(a.addressCountry) || 'USA').replace(/^US$/i, 'USA')
-        if (city && state && zip) {
-          out.push(`${line1Parts[0]}\n${city}, ${state} ${zip}\n${country}`)
-        }
-      }
-    }
-  }
-  return out
-}
-
-function extractAddresses(corpus, jsonldPages) {
-  const fromText = extractAddressesFromText(corpus)
-  const fromLd = extractAddressesFromJsonLd(jsonldPages)
-  return uniq([...fromText, ...fromLd])
+  return uniq(out)
 }
 
 // ====== Social media (canonical + dedup) ======
@@ -278,7 +317,7 @@ function extractSocialFromPages(pages) {
         const u = new URL(canon)
         const host = u.hostname
         const path = u.pathname
-        if (!path || path === '/') return
+        if (!path || path === '/') return // require at least one segment
         for (const p of platforms) {
           if (p.hosts.some(h => host.endsWith(h))) {
             if (p.disallow && p.disallow.some(bad => path.startsWith(bad))) return
@@ -378,81 +417,36 @@ function normalizeHoursFromCorpus(corpus) {
   if (lines.every(Boolean)) return lines.join('\n')
   return 'None'
 }
-function formatHoursFromJsonLd(jsonldPages) {
-  // look for openingHoursSpecification arrays
-  for (const { jsonld } of jsonldPages) {
-    const stack = Array.isArray(jsonld) ? jsonld : [jsonld]
-    const specs = []
-    const walk = (node) => {
-      if (!node || typeof node !== 'object') return
-      if (node.openingHoursSpecification) {
-        const list = Array.isArray(node.openingHoursSpecification)
-          ? node.openingHoursSpecification
-          : [node.openingHoursSpecification]
-        specs.push(...list)
-      }
-      Object.values(node).forEach(v => {
-        if (Array.isArray(v)) v.forEach(walk)
-        else if (v && typeof v === 'object') walk(v)
-      })
-    }
-    stack.forEach(walk)
-    if (!specs.length) continue
-
-    const map = {}
-    for (const s of specs) {
-      const days = s.dayOfWeek
-      const opens = s.opens
-      const closes = s.closes
-      if (!days || !opens || !closes) continue
-      const daysArr = Array.isArray(days) ? days : [days]
-      for (let d of daysArr) {
-        d = (d || '').toString()
-        const day = /Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday/.test(d)
-          ? d
-          : (d.match(/Mon|Tue|Wed|Thu|Fri|Sat|Sun/i)?.[0] || '')
-        const full = DAY_ABBR[day] || day
-        if (!FULL_DAYS.includes(full)) continue
-        const [oh, om='0'] = (opens || '09:00').split(':')
-        const [ch, cm='0'] = (closes || '17:00').split(':')
-        map[full] = `${full}: ${toAmPm(oh, om)} - ${toAmPm(ch, cm)}`
-      }
-    }
-    // fill missing as Closed if any exist? Requirement says all seven or None.
-    if (FULL_DAYS.every(d => map[d])) {
-      return FULL_DAYS.map(d => map[d]).join('\n')
-    }
+function fixHoursFormatting(modelHours, corpus, jsonldHoursMap) {
+  // Prefer JSON-LD if it covers all seven days
+  if (jsonldHoursMap && Object.keys(jsonldHoursMap).length === 7) {
+    return FULL_DAYS.map(d => jsonldHoursMap[d] || `${d}: Closed`).join('\n')
   }
-  return null
-}
-function fixHoursFormatting(modelHours, corpus, jsonldPages) {
-  if (modelHours && modelHours !== 'None') {
-    let s = String(modelHours).replace(/\r/g, '').trim()
-    s = s.replace(/\s*(Monday:)/g, '\n$1')
-         .replace(/\s*(Tuesday:)/g, '\n$1')
-         .replace(/\s*(Wednesday:)/g, '\n$1')
-         .replace(/\s*(Thursday:)/g, '\n$1')
-         .replace(/\s*(Friday:)/g, '\n$1')
-         .replace(/\s*(Saturday:)/g, '\n$1')
-         .replace(/\s*(Sunday:)/g, '\n$1')
-         .trim()
-    const lines = s.split(/\n+/).map(x => x.trim()).filter(Boolean)
-    const re = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday):\s*(?:Closed|(\d{2}:\d{2}\s(?:AM|PM))\s-\s(\d{2}:\d{2}\s(?:AM|PM)))$/
-    const ok = FULL_DAYS.every(day => lines.some(l => re.test(l) && l.startsWith(day + ':')))
-    if (ok) return lines.join('\n')
-  }
-  // try JSON-LD
-  const ld = formatHoursFromJsonLd(jsonldPages)
-  if (ld) return ld
-  // try text
-  return normalizeHoursFromCorpus(corpus)
+  if (!modelHours || modelHours === 'None') return normalizeHoursFromCorpus(corpus)
+  let s = String(modelHours).replace(/\r/g, '').trim()
+  s = s.replace(/\s*(Monday:)/g, '\n$1')
+       .replace(/\s*(Tuesday:)/g, '\n$1')
+       .replace(/\s*(Wednesday:)/g, '\n$1')
+       .replace(/\s*(Thursday:)/g, '\n$1')
+       .replace(/\s*(Friday:)/g, '\n$1')
+       .replace(/\s*(Saturday:)/g, '\n$1')
+       .replace(/\s*(Sunday:)/g, '\n$1')
+       .trim()
+  const lines = s.split(/\n+/).map(x => x.trim()).filter(Boolean)
+  const re = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday):\s*(?:Closed|(\d{2}:\d{2}\s(?:AM|PM))\s-\s(\d{2}:\d{2}\s(?:AM|PM)))$/
+  const ok = FULL_DAYS.every(day => lines.some(l => re.test(l) && l.startsWith(day + ':')))
+  if (!ok) return normalizeHoursFromCorpus(corpus)
+  return lines.join('\n')
 }
 
 // ====== Lead Form detection ======
 function detectLeadForm(pages, originUrl) {
   const start = new URL(originUrl)
   const domByUrl = new Map(pages.map(p => [p.url, cheerio.load(p.html)]))
-  const INTENT = /(quote|estimate|consult|consultation|request|schedule|book|appointment|service|contact|reservation|reserve|table)/i
+
+  const INTENT = /(quote|estimate|consult|consultation|request|schedule|book|appointment|service|contact|reserve|reservation|table)/i
+  const TITLE_HINT = /(get a quote|request service|schedule a consultation|book now|book a table|make a reservation)/i
+
   const candidates = []
   for (const { url, html } of pages) {
     const $ = cheerio.load(html)
@@ -462,6 +456,7 @@ function detectLeadForm(pages, originUrl) {
       const aria = ($(el).attr('aria-label') || '').trim()
       const title = ($(el).attr('title') || '').trim()
       const label = `${txt} ${aria} ${title}`.trim()
+
       if (!INTENT.test(label)) return
       if (!href) return
       try {
@@ -472,7 +467,8 @@ function detectLeadForm(pages, originUrl) {
       } catch {}
     })
   }
-  const FIELD_RE = /(name|email|phone|message|address|reservation)/i
+
+  const FIELD_RE = /(name|email|phone|message|address)/i
   function pageHasRealForm(u) {
     const $ = domByUrl.get(u)
     if (!$) return false
@@ -491,7 +487,11 @@ function detectLeadForm(pages, originUrl) {
     return hasField
   }
 
+  // prefer labels that look like CTAs
   candidates.sort((a, b) => {
+    const aScore = TITLE_HINT.test(a.label) ? 1 : 0
+    const bScore = TITLE_HINT.test(b.label) ? 1 : 0
+    if (aScore !== bScore) return bScore - aScore
     const ap = new URL(a.target).pathname.split('/').filter(Boolean).length
     const bp = new URL(b.target).pathname.split('/').filter(Boolean).length
     return bp - ap
@@ -589,23 +589,52 @@ export default async function handler(req, res) {
       return res.status(400).send('Please enter a valid URL.')
     }
 
-    // Crawl site (deeper + JSON-LD)
-    const { corpus, pages, jsonldPages } = await crawl(parsed.href)
-    if (!corpus && !jsonldPages.length) {
-      return res.status(422).send('Could not extract enough content from the provided site.')
-    }
+    // Crawl site (home + depth 2 + fallbacks)
+    const { corpus, pages } = await crawl(parsed.href)
 
-    // Deterministic fields
-    const emails = extractEmails(corpus || '')
-    // include JSON-LD telephone too (format later with regex)
-    const phonesFromText = extractPhones(corpus || '')
-    const addresses = extractAddresses(corpus || '', jsonldPages)
-    const socialFound = extractSocialFromPages(pages)
+    // JSON-LD harvest (phones, addresses, hours, socials)
+    const harvested = harvestFromJsonLd(pages)
+
+    // Deterministic fields from free text
+    const emails = extractEmails(corpus)
+    const phones = uniq([...extractPhones(corpus), ...extractPhones(harvested.phones.join(' '))])
+    const addressesText = extractAddresses(corpus)
+    const addressesJsonLd = harvested.addresses || []
+    const addresses = uniq([...(addressesJsonLd || []), ...(addressesText || [])])
+
+    const socialFound = uniq([
+      ...(extractSocialFromPages(pages) || []),
+      ...(
+        (harvested.socials || [])
+          .map(u => {
+            try {
+              const canon = new URL(u)
+              const host = canon.hostname.replace(/^www\./,'').toLowerCase()
+              const path = canon.pathname.replace(/\/+$/,'')
+              if (!path || path === '/') return null
+              if (host.includes('facebook.com')) return `Facebook: https://${host}${path}`
+              if (host.includes('instagram.com')) return `Instagram: https://${host}${path}`
+              if (host.includes('linkedin.com')) return `LinkedIn: https://${host}${path}`
+              if (host.includes('twitter.com') || host.includes('x.com')) return `X: https://${host}${path}`
+              if (host.includes('tiktok.com')) return `TikTok: https://${host}${path}`
+              if (host.includes('youtube.com')) return `YouTube: https://${host}${path}`
+              if (host.includes('vimeo.com')) return `Vimeo: https://${host}${path}`
+              if (host.includes('flickr.com')) return `Flickr: https://${host}${path}`
+              if (host.includes('foursquare.com')) return `Foursquare: https://${host}${path}`
+              if (host.includes('threads.net') || host.includes('threads.com')) return `Threads: https://${host}${path}`
+              if (host.includes('tumblr.com')) return `Tumblr: https://${host}${path}`
+              return null
+            } catch { return null }
+          })
+          .filter(Boolean)
+      )
+    ])
+
     const bbbFound = detectBBBSeal(pages)
-    const leadFormFound = detectLeadForm(pages, parsed.href)
+    const leadInfo = detectLeadForm(pages, parsed.href)
 
     const emailAddresses = emails.length ? emails.join('\n') : 'None'
-    const phoneNumbers = phonesFromText.length ? phonesFromText.join('\n') : 'None'
+    const phoneNumbers = phones.length ? phones.join('\n') : 'None'
     const addressesBlock = addresses.length ? addresses.join('\n\n') : 'None'
     const socialMediaUrls = socialFound.length ? socialFound.join('\n') : 'None'
     const bbbSealPlain = bbbFound
@@ -686,8 +715,16 @@ Return ONLY JSON.`
     const userPrompt = `Website URL: ${parsed.href}
 
 WEBSITE CONTENT (verbatim):
-${corpus || '(no visible text)'}
+${corpus}
 `
+
+    // If extremely thin but we have JSON-LD, still call the model
+    if (!corpus || corpus.length < 40) {
+      const hasStructured = (harvested.phones.length + harvested.addresses.length + Object.keys(harvested.hoursMap).length + harvested.socials.length) > 0
+      if (!hasStructured) {
+        return res.status(422).send('Could not extract enough content from the provided site.')
+      }
+    }
 
     let aiRaw = await callOpenAI(systemPrompt, userPrompt)
 
@@ -731,8 +768,8 @@ ${corpus || '(no visible text)'}
       productsAndServices = uniq(items).join(', ')
     }
 
-    // Hours (prefer JSON-LD, then model fix, then text)
-    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus || '', jsonldPages)
+    // Hours (prefer JSON-LD if complete)
+    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus, harvested.hoursMap)
 
     // Licenses (ensure labels; blank line between blocks)
     let licenseNumbers = String(payload.licenseNumbers || 'None') || 'None'
@@ -759,13 +796,12 @@ ${corpus || '(no visible text)'}
     const timeTaken = `${mins} minute${mins === 1 ? '' : 's'} ${secs} second${secs === 1 ? '' : 's'}`
 
     // Lead form (formatted)
-    const lead = detectLeadForm(pages, parsed.href)
     let leadForm = 'None'
     let leadFormTitle = ''
     let leadFormUrl = ''
-    if (lead) {
-      leadFormTitle = lead.title || ''
-      leadFormUrl = lead.url || ''
+    if (leadInfo) {
+      leadFormTitle = leadInfo.title || ''
+      leadFormUrl = leadInfo.url || ''
       leadForm = `Lead Form Title: ${leadFormTitle || 'None'}\nLead Form URL: ${leadFormUrl || 'None'}`
     }
 
@@ -792,7 +828,6 @@ ${corpus || '(no visible text)'}
       serviceArea,
       refundAndExchangePolicy,
 
-      // Lead form fields for UI
       leadForm,
       leadFormTitle,
       leadFormUrl
