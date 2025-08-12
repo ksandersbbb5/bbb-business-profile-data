@@ -21,6 +21,7 @@ export default function App() {
       })
       if (!res.ok) {
         const text = await res.text()
+        // Preserve helpful validation errors; friendlify everything else
         if (res.status === 400 || res.status === 422) {
           throw new Error(text || 'Please check the website URL and try again.')
         } else {
@@ -56,7 +57,9 @@ export default function App() {
         <div>
           <h1 style={{ fontSize: 28, margin: 0 }}>Obtain Information from Businesses Website for their BBB Business Profile</h1>
           <p style={{ color: '#444', margin: 0 }}>
-            This will generate the text of the BBB Business Profile Description Overview, also known as About This Business. It will also generate data for Owner Demographic, Products/Services, Social Media URLs, Hours of Operation, Phone Number(s), Address, License Information, BBB Seal, Email Addresses, and Methods of Payment from the information on their website.
+            This will generate the text of the BBB Business Profile Description Overview, also known as About This Business. 
+            It will also generate data for Owner Demographic, Products and Services, Hours of Operation, Address(es), 
+            Phone Number(s), Social Media URLs, License Number(s), Email Addresses, Methods of Payment, BBB Seal, and Service Area from the information on their website.
           </p>
         </div>
       </div>
@@ -76,7 +79,13 @@ export default function App() {
           type="button"
           onClick={handleReset}
           disabled={loading && !error}
-          style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #bbb', background: '#f7f7f7', cursor: 'pointer' }}
+          style={{
+            padding: '8px 12px',
+            borderRadius: 8,
+            border: '1px solid #bbb',
+            background: '#f7f7f7',
+            cursor: 'pointer'
+          }}
         >
           Start Again
         </button>
@@ -115,39 +124,43 @@ export default function App() {
           </div>
           <div style={{ marginBottom: 16 }}>
             <strong>Products and Services:</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.productsAndServices}</span>
+            <span>{result.productsAndServices}</span>
           </div>
           <div style={{ marginBottom: 16 }}>
             <strong>Hours of Operation:</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.hoursOfOperation}</span>
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{result.hoursOfOperation}</pre>
           </div>
           <div style={{ marginBottom: 16 }}>
             <strong>Address(es):</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.addresses}</span>
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{result.addresses}</pre>
           </div>
           <div style={{ marginBottom: 16 }}>
             <strong>Phone Number(s):</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.phoneNumbers}</span>
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{result.phoneNumbers}</pre>
           </div>
           <div style={{ marginBottom: 16 }}>
             <strong>Social Media URLs:</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.socialMediaUrls}</span>
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{result.socialMediaUrls}</pre>
           </div>
           <div style={{ marginBottom: 16 }}>
             <strong>License Number(s):</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.licenseNumbers}</span>
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <strong>BBB Seal on Website:</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.bbbSeal}</span>
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{result.licenseNumbers}</pre>
           </div>
           <div style={{ marginBottom: 16 }}>
             <strong>Email Addresses:</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.emailAddresses}</span>
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{result.emails}</pre>
           </div>
           <div style={{ marginBottom: 16 }}>
             <strong>Methods of Payment:</strong><br />
-            <span style={{ whiteSpace: 'pre-wrap' }}>{result.paymentMethods}</span>
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{result.paymentMethods}</pre>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>BBB Seal on Website:</strong><br />
+            <span dangerouslySetInnerHTML={{ __html: result.bbbSeal }} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Service Area:</strong><br />
+            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>{result.serviceArea}</pre>
           </div>
         </div>
       )}
