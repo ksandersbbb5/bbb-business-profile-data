@@ -4,7 +4,7 @@ export default function UrlForm({ onSubmit, loading, value, onChange, inputRef }
   const handleSubmit = useCallback(e => {
     e.preventDefault()
     if (value && !loading) {
-      onSubmit(value)
+      onSubmit(value.trim())
     }
   }, [onSubmit, value, loading])
 
