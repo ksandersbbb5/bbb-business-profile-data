@@ -4,6 +4,11 @@ import { isSingleValidUrl } from '../lib/validators'
 export default function UrlForm({ onSubmit, loading, value, onChange, inputRef }) {
   const [clientError, setClientError] = useState('')
 
+  const handleInput = (e) => {
+    onChange?.(e.target.value)
+    setClientError('')
+  }
+
   const handleSubmit = (e) => {
     e.preventDefault()
     const trimmed = (value || '').trim()
@@ -23,11 +28,11 @@ export default function UrlForm({ onSubmit, loading, value, onChange, inputRef }
       </label>
       <input
         id="url"
-        ref={inputRef}
         type="url"
         placeholder="https://www.example.com"
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={handleInput}
+        ref={inputRef}
         style={{ width: '100%', padding: '12px 14px', border: '1px solid #bbb', borderRadius: 8 }}
         required
       />
@@ -41,10 +46,12 @@ export default function UrlForm({ onSubmit, loading, value, onChange, inputRef }
           marginTop: 12,
           padding: '10px 14px',
           borderRadius: 8,
-          border: 'none',
+          border: '1px solid #00965E',
           background: '#00965E',
           color: '#fff',
-          cursor: loading ? 'wait' : 'pointer'
+          fontWeight: 600,
+          cursor: loading ? 'wait' : 'pointer',
+          transition: 'background 0.2s'
         }}
       >
         {loading ? 'Generating…' : 'Generate'}
