@@ -23,30 +23,15 @@ async function fetchHtml(url) {
   return await res.text()
 }
 
-// Preserve line breaks better: convert <br> and block elements to newlines before text()
 function extractVisibleText(html) {
   const $ = cheerio.load(html)
-
-  // remove obvious noise
   $('script, style, noscript, svg, iframe').remove()
-
-  // convert <br> to newlines
-  $('br').replaceWith('\n')
-
-  // add newlines before/after common block elements to avoid word runs
-  const blocks = 'p, div, section, article, header, footer, li, ul, ol, h1, h2, h3, h4, h5, h6, address'
-  $(blocks).each((_, el) => {
-    const t = $(el)
-    t.prepend('\n')
-    t.append('\n')
-  })
-
-  // get text and normalize
+  // normalize pipes and fix common CMS breaks
   return $('body').text()
-    .replace(/\|/g, ' ')         // menus like "About | Services"
+    .replace(/\|/g, ' ')
     .replace(/\r/g, '')
     .replace(/[ \t]+/g, ' ')
-    .replace(/\n\s*\n+/g, '\n\n') // collapse excess blank lines
+    .replace(/\n\s*\n+/g, '\n\n')
     .trim()
 }
 
@@ -105,7 +90,6 @@ function isValidNanp(area, exch, line) {
 }
 function extractPhones(text) {
   const out = []
-  // avoid mid‑ID matches; capture optional +1 and extensions
   const re = /(?<!\d)(?:\+?1[\s.\-]?)?(?:\(?(\d{3})\)?[\s.\-]?(\d{3})[\s.\-]?(\d{4}))(?:\s*(?:ext\.?|x|extension)\s*(\d+))?(?!\d)/gi
   let m
   while ((m = re.exec(text))) {
@@ -118,22 +102,18 @@ function extractPhones(text) {
   return uniq(out)
 }
 
-// ====== Addresses (improved) ======
+// ====== Addresses (hardened) ======
 
 // Clean up CMS-induced splits like "475\nWashington Street"
 function normalizeAddressBreaks(text) {
   return text
-    // join street number broken from first word
     .replace(/(\d{1,6})\s*\n\s*([A-Za-z])/g, '$1 $2')
-    // keep suite/unit with street
     .replace(/(\bSuite|Ste|#|Unit)\s*\n\s*/gi, '$1 ')
-    // collapse ", \n" to ", "
     .replace(/,\s*\n\s*/g, ', ')
-    // collapse multiple spaces
-    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\|\s*/g, ' ')
 }
 
-// street types required in line 1
+// Street types to require
 const STREET_TYPES = [
   'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr',
   'Lane','Ln','Court','Ct','Place','Pl','Parkway','Pkwy','Highway','Hwy',
@@ -141,22 +121,21 @@ const STREET_TYPES = [
 ]
 const STREET_TYPES_RE = new RegExp(`\\b(?:${STREET_TYPES.join('|')})\\b`, 'i')
 
-// reject obvious nav/boilerplate in street line
-const NAV_WORDS_RE = /\b(Home|About|Services|Contact|Reviews|Specials|Privacy|Terms|COVID|Update|Name:|Email:|Phone:|Menu|All rights reserved)\b/i
+// Obvious nav/boilerplate tokens to reject in the street line
+const NAV_WORDS_RE = /\b(Home|About|Services|Contact|Reviews|Specials|Privacy|Terms|COVID|Update|Name:|Email:|Phone:|Menu)\b/i
 
-// tolerate “123 Main St\nCity, ST 12345” OR “123 Main St, City, ST 12345”
 function extractAddresses(rawText) {
   const text = normalizeAddressBreaks(rawText)
 
-  // Build a tolerant pattern that allows optional comma/newline before city
-  const streetPart = String.raw`(\d{1,6}\s+[A-Za-z0-9.\-# ]+?\s+(?:${STREET_TYPES.join('|')})\b(?:\s*(?:,)?\s*(?:Suite|Ste|Unit|#)\s*\w+)?)`
-  const cityStateZip = String.raw`([A-Za-z][A-Za-z\s\.'-]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)`
-
-  // We’ll match either separated by newline OR comma space
+  // Regex finds: "123 Main St[ ,optional suite] NEWLINE City, ST ZIP"
   const re = new RegExp(
-    String.raw`(^|\n)\s*${streetPart}\s*(?:\n|,\s*)\s*${cityStateZip}(?=$|\n)`,
-    'gi'
-  )
+    String.raw`(^|\n)\s*` +
+    String.raw`(\d{1,6}\s+[A-Za-z0-9.\-# ]+?)` +
+    String.raw`\s+(?:` + STREET_TYPES.join('|') + String.raw`)` +
+    String.raw`(?:\s*,?\s*(?:Suite|Ste|Unit|#)\s*\w+)?` +
+    String.raw`\s*[\n,]\s*` +
+    String.raw`([A-Za-z][A-Za-z\s\.'-]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)`
+  , 'gi')
 
   const out = []
   let m
@@ -166,25 +145,19 @@ function extractAddresses(rawText) {
     const state = (m[4] || '').trim()
     const zip = (m[5] || '').trim()
 
-    // quality gates
+    // Quality gates
     if (!street || !STREET_TYPES_RE.test(street)) continue
     if (NAV_WORDS_RE.test(street)) continue
-
-    // avoid garbage like "000 sq. ft."
-    if (/\b(sq\.?\s*ft\.?|building at|copyright|©|®)\b/i.test(street)) continue
+    const letters = (street.match(/[A-Za-z]/g) || []).length
+    if (letters < 3) continue
 
     // ensure comma before suite/unit if missing
     street = street.replace(/\s+(Suite|Ste|Unit|#)\s*/i, ', $1 ')
-
-    // filter too-short or mostly digits
-    const letters = (street.match(/[A-Za-z]/g) || []).length
-    if (letters < 3) continue
 
     const addr = `${street}\n${city}, ${state} ${zip}\nUSA`
     out.push(addr)
   }
 
-  // dedupe and keep stable order
   return uniq(out)
 }
 
@@ -344,13 +317,11 @@ function fixHoursFormatting(modelHours, corpus) {
   return lines.join('\n')
 }
 
-// ====== Lead Form detection (prefer dedicated form page, not home) ======
+// ====== Lead Form detection ======
 function detectLeadForm(pages, originUrl) {
   const start = new URL(originUrl)
   const domByUrl = new Map(pages.map(p => [p.url, cheerio.load(p.html)]))
-
   const INTENT = /(quote|estimate|consult|consultation|request|schedule|book|appointment|service|contact)/i
-  const PREFERRED_SLUG = /(quote|estimate|consult|consultation|request|schedule|book|appointment|service|contact)/i
 
   const candidates = []
   for (const { url, html } of pages) {
@@ -360,57 +331,50 @@ function detectLeadForm(pages, originUrl) {
       const txt = ($(el).text() || '').trim()
       const aria = ($(el).attr('aria-label') || '').trim()
       const title = ($(el).attr('title') || '').trim()
-      const label = `${txt} ${aria} ${title}`.replace(/\s+/g, ' ').trim()
+      const label = `${txt} ${aria} ${title}`.trim()
 
       if (!INTENT.test(label)) return
       if (!href) return
       try {
         const abs = new URL(href, url)
         if (abs.origin !== start.origin) return
-        // must not be the root/homepage
         if (abs.pathname === '/' || abs.hash === '#') return
         candidates.push({ label, target: abs.href })
       } catch {}
     })
   }
 
-  // must have a real form with at least two of name/email/phone/message fields
   const FIELD_RE = /(name|email|phone|message|address)/i
   function pageHasRealForm(u) {
     const $ = domByUrl.get(u)
     if (!$) return false
     const forms = $('form')
     if (!forms.length) return false
-    let strong = false
+    let hasField = false
     forms.each((_, f) => {
       const ff = $(f)
-      const matches = ff.find('input, textarea, select').filter((_, i) => {
+      if (ff.find('input, textarea, select').filter((_, i) => {
         const nm = ($(i).attr('name') || '').toLowerCase()
         const pl = ($(i).attr('placeholder') || '').toLowerCase()
         const lbFor = $(`label[for="${$(i).attr('id') || ''}"]`).text().toLowerCase()
         return FIELD_RE.test(nm) || FIELD_RE.test(pl) || FIELD_RE.test(lbFor)
-      }).length
-      if (matches >= 2) strong = true
+      }).length) hasField = true
     })
-    return strong
+    return hasField
   }
 
-  // score: prefer deeper paths and preferred slugs
   candidates.sort((a, b) => {
-    const ap = new URL(a.target).pathname
-    const bp = new URL(b.target).pathname
-    const adepth = ap.split('/').filter(Boolean).length
-    const bdepth = bp.split('/').filter(Boolean).length
-    const aslug = PREFERRED_SLUG.test(ap) ? 1 : 0
-    const bslug = PREFERRED_SLUG.test(bp) ? 1 : 0
-    // slug wins first, then depth
-    if (bslug !== aslug) return bslug - aslug
-    return bdepth - adepth
+    const ap = new URL(a.target).pathname.split('/').filter(Boolean).length
+    const bp = new URL(b.target).pathname.split('/').filter(Boolean).length
+    return bp - ap
   })
 
   for (const c of candidates) {
     if (pageHasRealForm(c.target)) {
-      const title = c.label.replace(/\s*\|\s*/g, ' ').trim()
+      const title = c.label
+        .replace(/\s+/g, ' ')
+        .replace(/\s*\|\s*/g, ' ')
+        .trim()
       return { title, url: c.target }
     }
   }
@@ -507,4 +471,209 @@ export default async function handler(req, res) {
     }
 
     // Deterministic fields
-   
+    const emails = extractEmails(corpus)
+    const phones = extractPhones(corpus)
+    const addresses = extractAddresses(corpus)
+    const socialFound = extractSocialFromPages(pages)
+    const bbbFound = detectBBBSeal(pages)
+    const lead = detectLeadForm(pages, parsed.href)
+
+    const emailAddresses = emails.length ? emails.join('\n') : 'None'
+    const phoneNumbers = phones.length ? phones.join('\n') : 'None'
+    const addressesBlock = addresses.length ? addresses.join('\n\n') : 'None'
+    const socialMediaUrls = socialFound.length ? socialFound.join('\n') : 'None'
+    const bbbSealPlain = bbbFound
+      ? 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
+      : 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
+
+    // ====== Model (judgment fields) ======
+    const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
+
+INFORMATION SOURCE:
+Use ONLY the provided website content.
+
+EXCLUSIONS:
+- Do not reference other businesses in the industry.
+- Exclude owner names, locations, hours of operation, and time-related information (including start dates and time in business) unless the field specifically requests them.
+- Avoid the characters * [ ].
+- Do NOT include links to any websites.
+
+DO NOT INCLUDE:
+- The text “Business Description” or any variation.
+- The phrase “for more information visit their website at the provided URL” or any variation.
+- Promotional language of any kind, including the listed banned words/phrases.
+- Any wording implying trust/endorsement/popularity (e.g., "trusted by", "preferred by").
+
+GENERAL GUIDELINES:
+- Business Description: factual only, no advertising claims, no history or storytelling, <=900 characters.
+- If a requested field cannot be fully satisfied from the website content, return "None" (without quotes).
+
+BUSINESS DESCRIPTION TEMPLATE:
+"[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."
+
+PRODUCTS & SERVICES:
+- List as comma-separated categories, each item 1–4 words, each word capitalized. No bullets or numbering. No service areas. If none, "None".
+
+HOURS OF OPERATION:
+- MUST list all seven days in the exact format:
+Monday: 09:00 AM - 05:00 PM
+...
+Sunday: Closed
+- If the site does not provide all seven days, return "None". NEVER invent or infer.
+
+OWNER DEMOGRAPHIC:
+- Return exact match from the approved list or "None".
+
+LICENSE NUMBER(S):
+- For each license found, return exactly:
+License Number: <value or None>
+Issuing Authority: <value or None>
+License Type: <value or None>
+Status: <value or None>
+Expiration Date: <value or None>
+- Blank line between each license. If none, "None".
+
+METHODS OF PAYMENT:
+- Return comma-separated from this approved list only (case-sensitive format):
+ACH, Amazon Payments, American Express, Apple Pay, Balance Adjustment, Bitcoin, Cash, Certified Check, China UnionPay, Coupon, Credit Card, Debit Card, Discover, Electronic Check, Financing, Google Pay, Invoice, MasterCard, Masterpass, Money Order, PayPal, Samsung Pay, Store Card, Venmo, Visa, Western Union, Wire Transfer, Zelle
+- If none, "None".
+
+SERVICE AREA:
+- Geographic areas explicitly listed on the site. If none, "None".
+
+REFUND AND EXCHANGE POLICY:
+- Extract policy text if present. If none, "None".
+
+OUTPUT:
+Return strict JSON with keys (all strings):
+description
+clientBase
+ownerDemographic
+productsAndServices
+hoursOfOperation
+licenseNumbers
+methodsOfPayment
+serviceArea
+refundAndExchangePolicy
+Return ONLY JSON.`
+
+    const userPrompt = `Website URL: ${parsed.href}
+
+WEBSITE CONTENT (verbatim):
+${corpus}
+`
+
+    let aiRaw = await callOpenAI(systemPrompt, userPrompt)
+
+    let payload
+    try {
+      const jsonMatch = aiRaw.match(/\{[\s\S]*\}$/)
+      payload = JSON.parse(jsonMatch ? jsonMatch[0] : aiRaw)
+    } catch {
+      const fix = await callOpenAI(
+        'Return ONLY valid JSON with the exact keys requested. No commentary.',
+        `Convert to valid JSON:\n${aiRaw}`
+      )
+      payload = JSON.parse(fix)
+    }
+
+    const clientBase = enforceClientBase(String(payload.clientBase || 'residential'))
+
+    // Description: rewrite to exact template and append client base sentence
+    let desc0 = sanitizeDescription(String(payload.description || ''))
+    const descRewrite = await callOpenAI(
+      'Return ONLY the following text, <=900 chars, neutral tone, no promotional words, no links:\nTemplate: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."',
+      desc0
+    )
+    let description = sanitizeDescription(descRewrite || desc0)
+    if (!/[.!?]$/.test(description)) description += '.'
+    description += ` The business provides services to ${clientBase} customers.`
+    if (containsBanned(description)) {
+      for (const p of BANNED_PHRASES) {
+        const re = new RegExp(p, 'gi')
+        description = description.replace(re, '')
+      }
+      description = sanitizeDescription(description)
+    }
+
+    // Products & Services
+    let productsAndServices = String(payload.productsAndServices || 'None') || 'None'
+    if (productsAndServices !== 'None') {
+      const items = productsAndServices.split(',').map(s => s.trim()).filter(Boolean).map(s =>
+        s.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')
+      )
+      productsAndServices = uniq(items).join(', ')
+    }
+
+    // Hours (one per line or None)
+    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus)
+
+    // Licenses (ensure labels; blank line between blocks)
+    let licenseNumbers = String(payload.licenseNumbers || 'None') || 'None'
+    if (licenseNumbers !== 'None') {
+      const blocks = licenseNumbers.split(/\n{2,}/).map(b => b.trim()).filter(Boolean).map(b => {
+        const get = (label) => {
+          const m = b.match(new RegExp(`${label}:\\s*(.*)`, 'i'))
+          return (m && m[1] && m[1].trim()) || 'None'
+        }
+        return `License Number: ${get('License Number')}\nIssuing Authority: ${get('Issuing Authority')}\nLicense Type: ${get('License Type')}\nStatus: ${get('Status')}\nExpiration Date: ${get('Expiration Date')}`
+      })
+      licenseNumbers = uniq(blocks).join('\n\n')
+    }
+
+    let ownerDemographic = String(payload.ownerDemographic || 'None') || 'None'
+    let methodsOfPayment = String(payload.methodsOfPayment || 'None') || 'None'
+    let serviceArea = String(payload.serviceArea || 'None') || 'None'
+    let refundAndExchangePolicy = String(payload.refundAndExchangePolicy || 'None') || 'None'
+
+    // Timing
+    const elapsed = Date.now() - start
+    const mins = Math.floor(elapsed / 60000)
+    const secs = Math.floor((elapsed % 60000) / 1000)
+    const timeTaken = `${mins} minute${mins === 1 ? '' : 's'} ${secs} second${secs === 1 ? '' : 's'}`
+
+    // Lead form (formatted)
+    const lead = detectLeadForm(pages, parsed.href)
+    let leadForm = 'None'
+    let leadFormTitle = ''
+    let leadFormUrl = ''
+    if (lead) {
+      leadFormTitle = lead.title || ''
+      leadFormUrl = lead.url || ''
+      leadForm = `Lead Form Title: ${leadFormTitle || 'None'}\nLead Form URL: ${leadFormUrl || 'None'}`
+    }
+
+    // Final response
+    res.setHeader('Content-Type', 'application/json')
+    return res.status(200).send(JSON.stringify({
+      url: parsed.href,
+      timeTaken,
+
+      description,
+      clientBase,
+      ownerDemographic,
+      productsAndServices,
+
+      hoursOfOperation,
+      addresses: ensureHeaderBlocks(addresses.length ? addresses.join('\n\n') : 'None'),
+      phoneNumbers: ensureHeaderBlocks(phones.length ? phones.join('\n') : 'None'),
+      emailAddresses: ensureHeaderBlocks(emails.length ? emails.join('\n') : 'None'),
+      socialMediaUrls: ensureHeaderBlocks(socialFound.length ? socialFound.join('\n') : 'None'),
+
+      licenseNumbers: ensureHeaderBlocks(licenseNumbers),
+      methodsOfPayment,
+      bbbSeal: bbbSealPlain,
+      serviceArea,
+      refundAndExchangePolicy,
+
+      // Lead form fields for UI flexibility
+      leadForm,
+      leadFormTitle,
+      leadFormUrl
+    }))
+
+  } catch (err) {
+    const code = err.statusCode || 500
+    return res.status(code).send(err.message || 'Internal Server Error')
+  }
+}
