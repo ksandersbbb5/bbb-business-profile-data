@@ -1,64 +1,90 @@
-import * as cheerio from 'cheerio';
+import * as cheerio from 'cheerio'
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
+// --- helpers ---
 async function readJsonBody(req) {
-  if (req.body && typeof req.body === 'object') return req.body;
-  const chunks = [];
-  for await (const c of req) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-  const raw = Buffer.concat(chunks).toString('utf8') || '{}';
-  try { return JSON.parse(raw); } catch { return {}; }
+  if (req.body && typeof req.body === 'object') return req.body
+  const chunks = []
+  for await (const c of req) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c))
+  const raw = Buffer.concat(chunks).toString('utf8') || '{}'
+  try { return JSON.parse(raw) } catch { return {} }
 }
+
+const ALLOWED_CLIENT_BASE = new Set([
+  'residential',
+  'commercial',
+  'residential and commercial',
+  'government',
+  'non-profit'
+])
+
+const BANNED_PHRASES = [
+  'warranties','warranty','guarantee','guaranteed','quality','needs','free','reliable','premier','expert','experts','best','unique','peace of mind','largest','top','selection','ultimate','consultation','skilled','known for','prominent','paid out','commitment','Experts at','Experts in','Cost effective','cost saving','Ensuring efficiency','Best at','best in','Ensuring','Excels','Rely on us',
+  'trusted by','relied on by','endorsed by','preferred by','backed by',
+  'Free','Save','Best','New','Limited','Exclusive','Instant','Now','Proven','Sale','Bonus','Act Fast','Unlock'
+]
+
+function badWordPresent(text) {
+  const lower = (text || '').toLowerCase()
+  return BANNED_PHRASES.some(p => lower.includes(p.toLowerCase()))
+}
+function sanitize(text) {
+  let t = (text || '').replace(/[\*\[\]]/g, '')
+  if (t.length > 900) t = t.slice(0, 900)
+  return t.trim()
+}
+function sameOrigin(u1, u2) { return u1.origin === u2.origin }
+function pathLevel(u) { return u.pathname.split('/').filter(Boolean).length }
 
 async function fetchHtml(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 BBB Profile Scraper' } });
-  if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
-  return await res.text();
+  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 BBB Profile Scraper' } })
+  if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`)
+  return await res.text()
 }
-
 function extractVisibleText(html) {
-  const $ = cheerio.load(html);
-  $('script, style, noscript, svg, iframe').remove();
-  return $('body').text().replace(/\s+/g, ' ').trim();
+  const $ = cheerio.load(html)
+  $('script, style, noscript, svg, iframe').remove()
+  return $('body').text().replace(/\s+/g, ' ').trim()
 }
 
 async function crawl(rootUrl) {
-  const start = new URL(rootUrl);
-  const visited = new Set();
-  const queue = [start.href];
-  const texts = [];
-  let htmlPages = [];
+  const start = new URL(rootUrl)
+  const visited = new Set()
+  const queue = [start.href]
+  const texts = []
 
-  while (queue.length && htmlPages.length < 8) {
-    const current = queue.shift();
-    if (visited.has(current)) continue;
-    visited.add(current);
+  while (queue.length) {
+    const current = queue.shift()
+    if (visited.has(current)) continue
+    visited.add(current)
     try {
-      const html = await fetchHtml(current);
-      htmlPages.push(html);
-      const text = extractVisibleText(html);
-      if (text) texts.push(text);
-      const $ = cheerio.load(html);
+      const html = await fetchHtml(current)
+      const text = extractVisibleText(html)
+      if (text) texts.push(text)
+      const $ = cheerio.load(html)
       $('a[href]').each((_, el) => {
         try {
-          const href = $(el).attr('href');
-          if (!href) return;
-          const abs = new URL(href, start.href);
-          if (abs.origin !== start.origin) return;
-          if (queue.length < 25 && !visited.has(abs.href)) queue.push(abs.href);
+          const href = $(el).attr('href')
+          if (!href) return
+          const abs = new URL(href, start.href)
+          if (!sameOrigin(start, abs)) return
+          if (pathLevel(abs) <= 1) {
+            if (!visited.has(abs.href) && queue.length < 25) queue.push(abs.href)
+          }
         } catch {}
-      });
+      })
     } catch {}
   }
-  return { text: texts.join('\n\n'), htmlPages };
+  return texts.join('\n\n')
 }
 
 async function callOpenAI(systemPrompt, userPrompt) {
   if (!OPENAI_API_KEY) {
-    const err = new Error('Missing OPENAI_API_KEY');
-    err.statusCode = 500;
-    throw err;
+    const err = new Error('Missing OPENAI_API_KEY')
+    err.statusCode = 500
+    throw err
   }
   const body = {
     model: MODEL,
@@ -67,7 +93,7 @@ async function callOpenAI(systemPrompt, userPrompt) {
       { role: 'user', content: userPrompt }
     ],
     temperature: 0.2
-  };
+  }
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -75,178 +101,158 @@ async function callOpenAI(systemPrompt, userPrompt) {
       'Authorization': `Bearer ${OPENAI_API_KEY}`
     },
     body: JSON.stringify(body)
-  });
+  })
   if (!res.ok) {
-    const errText = await res.text();
-    const err = new Error(`OpenAI error: ${res.status} ${errText}`);
-    err.statusCode = res.status;
-    throw err;
+    const errText = await res.text()
+    const err = new Error(`OpenAI error: ${res.status} ${errText}`)
+    err.statusCode = res.status
+    throw err
   }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || '';
+  const data = await res.json()
+  return data.choices?.[0]?.message?.content || ''
+}
+
+function enforceClientBase(value) {
+  const v = (value || '').trim().toLowerCase()
+  return ALLOWED_CLIENT_BASE.has(v) ? v : 'residential'
+}
+function stripExcluded(text) {
+  let t = text || ''
+  t = t.replace(/https?:\S+/g, '')
+  const NEVER = [
+    'Business Description','Business description','business description',
+    'for more information visit their website','for more information, visit their website'
+  ]
+  NEVER.forEach(p => { t = t.replace(new RegExp(p, 'gi'), '') })
+  return t
 }
 
 export default async function handler(req, res) {
-  if (req.method === 'OPTIONS') return res.status(204).end();
-  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-  const startTime = Date.now();
+  if (req.method === 'OPTIONS') return res.status(204).end()
+  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
+
+  const startTime = Date.now()
 
   try {
-    const body = await readJsonBody(req);
-    const { url } = body || {};
-    if (!url) return res.status(400).send('Missing url');
+    const body = await readJsonBody(req)
+    const { url } = body || {}
+    if (!url) return res.status(400).send('Missing url')
 
-    let parsed;
+    let parsed
     try {
-      parsed = new URL(url);
-      if (!/^https?:$/.test(parsed.protocol)) throw new Error('bad protocol');
+      parsed = new URL(url)
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error('bad protocol')
     } catch {
-      return res.status(400).send('Please enter a valid URL.');
+      return res.status(400).send('Please enter a valid URL.')
     }
 
-    const { text: corpus, htmlPages } = await crawl(parsed.href);
+    const corpus = await crawl(parsed.href)
     if (!corpus || corpus.length < 40) {
-      return res.status(422).send('Could not extract enough content from the provided site.');
+      return res.status(422).send('Could not extract enough content from the provided site.')
     }
 
-    // Extract all <a> and <img> href/src for social and BBB Seal search
-    let allLinks = [];
-    let allImgs = [];
-    for (const html of htmlPages) {
-      const $ = cheerio.load(html);
-      $('a[href]').each((_, el) => allLinks.push($(el).attr('href')));
-      $('img[src]').each((_, el) => allImgs.push($(el).attr('src')));
-    }
-    // Prepare for social links & seal
-    const allLinksJoined = allLinks.filter(Boolean).join('\n');
-    const allImgsJoined = allImgs.filter(Boolean).join('\n');
+    // --- LLM PROMPT ---
 
-    // ==== PROMPT INSTRUCTIONS (ALL DATA POINTS) ====
     const systemPrompt = `
-You are a BBB AI assistant for extracting business information from a website. Use ONLY the provided content (text and URLs) to answer.
-Return STRICT JSON as follows:
-{
-"description": string,
-"clientBase": string,
-"ownerDemographic": string,
-"productsServices": string,
-"hours": string,
-"addresses": string,
-"phones": string,
-"socialMedia": string,
-"licenseNumbers": string,
-"emails": string,
-"paymentMethods": string,
-"bbbSeal": string,
-"serviceArea": string,
-"refundExchangePolicy": string
-}
+You are a BBB representative enhancing a BBB Business Profile. Use ONLY the provided website content for each data point. DO NOT make up information or use prior knowledge. If a data point cannot be found, output exactly 'None' (no quotes, no extra spaces).
 
-1) Business Description:
-Strict, factual summary (≤900 chars, Arial font, never promotional). Do NOT include 'Business Description'. Exclude owner names, location, hours, dates. No links. No advertising.
-2) Client Base:
-One of: residential, commercial, residential and commercial, government, non-profit.
-3) Owner Demographic:
-If website text matches EXACTLY (case-insensitive, no variations) one of:
-Asian American Owned, Black/African American Owned, African American Owned, Black Owned, Disabled Owned, Employee Owned Owned, Family Owned, Family-Owned, First Responder Owned, Hispanic Owned, Indigenous Owned, LBGTQ Owned, Middle Eastern Owned, Minority Owned, Native American Owned, Pacific Owned, Veteran Owned, Woman Owned
-...then output the value. Else 'None'.
-4) Products and Services:
-List each product/service as a category, 1–4 words each, **capitalize each word, separate with commas**. No numbers/bullets. No service areas. No marketing words. If none, output 'None'.
-5) Hours of Operation:
-Output each day as: Monday: 09:00 AM - 05:00 PM etc. (12-hour, AM/PM, "Closed" if not open). If not found for all 7 days, output 'None'. Do not make up hours.
-6) Address(es):
-Extract only **valid physical addresses** in this 3-line format. If more than one, separate with a single blank line:
+**Data Points & Output Formats**
+
+1) Business Description and Client Base
+- Strictly factual, max 900 characters, no promotional words, no advertising, no forbidden language (see below), do not reference owner names, locations, hours, or time.
+- Template: "Business Description: <description> The business provides services to <clientBase> customers."
+- Allowed clientBase values: residential, commercial, residential and commercial, government, non-profit.
+
+2) Owner Demographic
+- If exact match (case-insensitive) to this list, return category: Asian American Owned, Black/African American Owned, African American Owned, Black Owned, Disabled Owned, Employee Owned Owned, Family Owned, Family-Owned, First Responder Owned, Hispanic Owned, Indigenous Owned, LBGTQ Owned, Middle Eastern Owned, Minority Owned, Native American Owned, Pacific Owned, Veteran Owned, Woman Owned. Else, return 'None'.
+- Output: Owner Demographic: <ownerDemographic>
+
+3) Products and Services
+- List each product/service as a 1-4 word capitalized category, separated by commas. No numbering or bulleting. Each word capitalized. No service areas. Exclude generic phrases (e.g., "Additional Offers", "Free Shipping"). If none, output "None".
+- Output: Products and Services: <productsAndServices>
+
+4) Hours of Operation
+- If found for all 7 days, output each as "Monday: 09:00 AM - 05:00 PM". If only partial week or info, output "None". If hours say "Mon-Fri: 8am-7pm", expand to all five weekdays, weekends as "Closed". Always use 12-hour format with AM/PM.
+- Output: Hours of Operation:
+Monday: <monday>
+Tuesday: <tuesday>
+Wednesday: <wednesday>
+Thursday: <thursday>
+Friday: <friday>
+Saturday: <saturday>
+Sunday: <sunday>
+(Or: None)
+
+5) Address(es)
+- Extract every valid street address. Format each as:
 123 Main St, Suite 400
 Boston, MA 02108
 USA
-If not found, output 'None'.
-7) Phone Number(s):
-Extract every valid US phone, format as (123) 456-7890 or with ext. if present. Each on its own line. If none, output 'None'.
-8) Social Media URLs:
-If found, output as:
-Facebook: https://www.facebook.com/username
-Instagram: ...
-(see list). **Do NOT include URLs that are only the root domain** (e.g., facebook.com/). Remove duplicates. Check both header and footer. If none, output 'None'.
-9) License Number(s):
-For every license found, output all fields:
-License Number: ABC-123456
-Issuing Authority: ...
-License Type: ...
-Status: ...
-Expiration Date: ...
-If a field is missing, use "None". Each license separated by a blank line. If none, output 'None'.
-10) Email Addresses:
-List all found, each on its own line. If none, output 'None'.
-11) Methods of Payment:
-Extract and output as comma-separated values (from: ACH, Amazon Payments, American Express, ...). If none, output 'None'.
-12) BBB Seal on Website:
-If an image file name (from img src) includes "bbb" or "accredited", or text "BBB Accredited" is found in content (not "Site managed by BBB"), output:
-FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.
-If not found, output:
-<span style="color: red">NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.</span>
-13) Service Area:
-Extract the service/geographical territory as stated (city, county, state, zip). If none, output 'None'.
-14) Refund and Exchange Policy:
-Extract if present. If not, output 'None'.
+- If multiple, add a blank line between each. If none, output "None".
 
-All output must be STRICT JSON. Do NOT invent or hallucinate data.
-`;
+6) Phone Number(s)
+- Extract all valid U.S. phone numbers and format as (123) 456-7890 (with "ext. 1234" if extension). One per row. If none, output "None".
 
-    const userPrompt = `
-Website URL: ${parsed.href}
+7) Social Media URLs
+- List only if a valid URL with a non-root path segment (e.g., facebook.com/username). Check for all standard platforms (Facebook, Instagram, LinkedIn, X (Twitter), TikTok, YouTube, Vimeo, Flickr, Foursquare, Threads, Tumblr). One per row, platform name first, e.g., Facebook: https://facebook.com/example. If none, output "None".
+
+8) License Number(s)
+- Format each as:
+License Number: <licenseNumber>
+Issuing Authority: <authority or None>
+License Type: <type or None>
+Status: <status or None>
+Expiration Date: <expiration or None>
+Blank line after each license. If none, output "None".
+
+9) Email Addresses
+- List each valid email found, one per row. If none, output "None".
+
+10) Methods of Payment
+- Extract only from this list: ACH, Amazon Payments, American Express, Apply Pay, Balance Adjustment, Bitcoin, Cash, Certified Check, China UnionPay, Coupon, Credit Card, Debit Card, Discover, Electronic Check, Financing, Google Pay, Invoice, MasterCard, Masterpass, Money Order, PayPal, Samsung Pay, Store Card, Venmo, Visa, Western Union, Wire Transfer, Zelle. Comma-separated. If none, output "None".
+
+11) BBB Seal on Website
+- If any image filename contains "bbb" or "accredited" or the text "BBB Accredited" appears, and NOT just "site managed by BBB", output: FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.
+- If not found, output in red text: NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.
+
+12) Service Area
+- Extract any service area/territory mentioned (county, city, state, zip, region, or phrases like "serving..."). If none, output "None".
+
+13) Refund and Exchange Policy
+- Extract exact refund/exchange policy details. If none, output "None".
+
+BANNED WORDS/PHRASES: ${BANNED_PHRASES.join(', ')}
+
+---
+
+Return output for each data point exactly in the order above, labeled as shown, separated by a single blank line. DO NOT make up or infer data points. DO NOT invent plausible answers. Use ONLY website content.
+    `
+
+    const userPrompt = `Website URL: ${parsed.href}
 
 WEBSITE CONTENT:
+
 ${corpus}
 
-ALL <a> LINKS (for social/search):
-${allLinksJoined}
+IMPORTANT: For each data point, return exactly as described. If not found, output "None". Do not invent or infer.`
+    // ---
 
-ALL <img> SRCs (for BBB Seal):
-${allImgsJoined}
-`;
+    let aiRaw = await callOpenAI(systemPrompt, userPrompt)
 
-    let aiRaw = await callOpenAI(systemPrompt, userPrompt);
+    // Parse output (robust, extract JSON or sectioned plain text)
+    // Here we simply pass through the text, as the LLM returns fully formatted output.
 
-    // JSON tolerant parse
-    let payload;
-    try {
-      const jsonMatch = aiRaw.match(/\{[\s\S]*\}$/);
-      payload = JSON.parse(jsonMatch ? jsonMatch[0] : aiRaw);
-    } catch {
-      const fix = await callOpenAI(
-        'Return ONLY valid JSON with the same keys as above, nothing else.',
-        `Please convert the following into strict JSON: ${aiRaw}`
-      );
-      payload = JSON.parse(fix);
-    }
+    // Post-processing (optional): None needed if LLM obeys the prompt
 
-    const elapsedMs = Date.now() - startTime;
-
-    // Always sanitize fields and handle None
-    function clean(v) { return (typeof v === 'string' && v.trim()) ? v.trim() : 'None'; }
-
-    res.setHeader('Content-Type', 'application/json');
+    const durationMs = Date.now() - startTime
+    res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
       url: parsed.href,
-      elapsed: elapsedMs,
-      description: clean(payload.description),
-      clientBase: clean(payload.clientBase),
-      ownerDemographic: clean(payload.ownerDemographic),
-      productsServices: clean(payload.productsServices),
-      hours: clean(payload.hours),
-      addresses: clean(payload.addresses),
-      phones: clean(payload.phones),
-      socialMedia: clean(payload.socialMedia),
-      licenseNumbers: clean(payload.licenseNumbers),
-      emails: clean(payload.emails),
-      paymentMethods: clean(payload.paymentMethods),
-      bbbSeal: clean(payload.bbbSeal),
-      serviceArea: clean(payload.serviceArea),
-      refundExchangePolicy: clean(payload.refundExchangePolicy)
-    }));
-
+      output: aiRaw,
+      duration: durationMs
+    }))
   } catch (err) {
-    const code = err.statusCode || 500;
-    return res.status(code).send(err.message || 'Internal Server Error');
+    const code = err.statusCode || 500
+    return res.status(code).send(err.message || 'Internal Server Error')
   }
 }
