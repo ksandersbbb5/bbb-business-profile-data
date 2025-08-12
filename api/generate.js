@@ -1,457 +1,156 @@
-import * as cheerio from 'cheerio'
+import React, { useState, useRef } from 'react'
+import UrlForm from './components/UrlForm'
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+export default function App() {
+  const [url, setUrl] = useState('')
+  const [result, setResult] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const inputRef = useRef(null)
 
-// --- helpers ---
-async function readJsonBody(req) {
-  if (req.body && typeof req.body === 'object') return req.body
-  const chunks = []
-  for await (const c of req) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c))
-  const raw = Buffer.concat(chunks).toString('utf8') || '{}'
-  try { return JSON.parse(raw) } catch { return {} }
-}
-
-const ALLOWED_CLIENT_BASE = new Set([
-  'residential',
-  'commercial',
-  'residential and commercial',
-  'government',
-  'non-profit'
-])
-
-const BANNED_PHRASES = [
-  'warranties','warranty','guarantee','guaranteed','quality','needs','free','reliable','premier','expert','experts','best','unique','peace of mind','largest','top','selection','ultimate','consultation','skilled','known for','prominent','paid out','commitment','Experts at','Experts in','Cost effective','cost saving','Ensuring efficiency','Best at','best in','Ensuring','Excels','Rely on us',
-  'trusted by','relied on by','endorsed by','preferred by','backed by',
-  'Free','Save','Best','New','Limited','Exclusive','Instant','Now','Proven','Sale','Bonus','Act Fast','Unlock'
-]
-
-function badWordPresent(text) {
-  const lower = (text || '').toLowerCase()
-  return BANNED_PHRASES.some(p => lower.includes(p.toLowerCase()))
-}
-function sanitize(text) {
-  let t = (text || '').replace(/[\*\[\]]/g, '')
-  if (t.length > 900) t = t.slice(0, 900)
-  return t.trim()
-}
-function sameOrigin(u1, u2) { return u1.origin === u2.origin }
-function pathLevel(u) { return u.pathname.split('/').filter(Boolean).length }
-
-async function fetchHtml(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 BBB Profile Scraper' } })
-  if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`)
-  return await res.text()
-}
-function extractVisibleText(html) {
-  const $ = cheerio.load(html)
-  $('script, style, noscript, svg, iframe').remove()
-  return $('body').text().replace(/\s+/g, ' ').trim()
-}
-
-/** Crawl home + depth-1 same-origin pages. Returns { text, hrefs, htmls } */
-async function crawl(rootUrl) {
-  const start = new URL(rootUrl)
-  const visited = new Set()
-  const queue = [start.href]
-  const texts = []
-  const hrefs = []
-  const htmls = []
-
-  while (queue.length) {
-    const current = queue.shift()
-    if (visited.has(current)) continue
-    visited.add(current)
-
+  const handleSubmit = async (submittedUrl) => {
+    const useUrl = (submittedUrl || url || '').trim()
+    setError('')
+    setResult(null)
+    setLoading(true)
     try {
-      const html = await fetchHtml(current)
-      htmls.push(html)
-      const $ = cheerio.load(html)
-
-      $('script, style, noscript, svg, iframe').remove()
-      const t = $('body').text().replace(/\s+/g, ' ').trim()
-      if (t) texts.push(t)
-
-      $('a[href]').each((_, el) => {
-        const href = $(el).attr('href')
-        if (!href) return
-        try {
-          const abs = new URL(href, start.href)
-          hrefs.push(abs.href)
-          if (sameOrigin(start, abs) && pathLevel(abs) <= 1) {
-            if (!visited.has(abs.href) && queue.length < 25) queue.push(abs.href)
-          }
-        } catch {}
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: useUrl })
       })
-    } catch {}
-  }
-  return { text: texts.join('\n\n'), hrefs, htmls }
-}
-
-async function callOpenAI(systemPrompt, userPrompt) {
-  if (!OPENAI_API_KEY) {
-    const err = new Error('Missing OPENAI_API_KEY')
-    err.statusCode = 500
-    throw err
-  }
-  const body = {
-    model: MODEL,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    temperature: 0.2
-  }
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${OPENAI_API_KEY}`
-    },
-    body: JSON.stringify(body)
-  })
-  if (!res.ok) {
-    const errText = await res.text()
-    const err = new Error(`OpenAI error: ${res.status} ${errText}`)
-    err.statusCode = res.status
-    throw err
-  }
-  const data = await res.json()
-  return data.choices?.[0]?.message?.content || ''
-}
-
-function enforceClientBase(value) {
-  const v = (value || '').trim().toLowerCase()
-  return ALLOWED_CLIENT_BASE.has(v) ? v : 'residential'
-}
-function stripExcluded(text) {
-  let t = text || ''
-  t = t.replace(/https?:\S+/g, '')
-  const NEVER = [
-    'Business Description','Business description','business description',
-    'for more information visit their website','for more information, visit their website'
-  ]
-  NEVER.forEach(p => { t = t.replace(new RegExp(p, 'gi'), '') })
-  return t
-}
-
-/* Owner Demographic (exact match only) */
-const OWNER_CATEGORIES = [
-  'Asian American Owned',
-  'Black/African American Owned',
-  'African American Owned',
-  'Black Owned',
-  'Disabled Owned',
-  'Employee Owned Owned',
-  'Family Owned',
-  'Family-Owned',
-  'First Responder Owned',
-  'Hispanic Owned',
-  'Indigenous Owned',
-  'LBGTQ Owned',
-  'Middle Eastern Owned',
-  'Minority Owned',
-  'Native American Owned',
-  'Pacific Owned',
-  'Veteran Owned',
-  'Woman Owned'
-]
-function detectOwnerDemographic(text = '') {
-  for (const label of OWNER_CATEGORIES) {
-    const escaped = label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
-    const re = new RegExp(`\\b${escaped}\\b`, 'i')
-    if (re.test(text)) return label
-  }
-  return 'None'
-}
-
-/* Products & Services */
-function cleanProductsAndServices(value) {
-  if (!value) return 'None'
-  const v = String(value).trim()
-  return v || 'None'
-}
-
-/* Hours of Operation: validation */
-const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-const TIME_RE = '(0?[1-9]|1[0-2]):[0-5][0-9] (AM|PM)'
-const LINE_RE = new RegExp(`^(${DAYS.join('|')}): ((${TIME_RE} - ${TIME_RE})|Closed)$`)
-
-function normalizeHours(raw) {
-  if (!raw) return 'None'
-  let t = String(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
-  if (!t) return 'None'
-  const lines = t.split('\n').map(s => s.trim()).filter(Boolean)
-  if (lines.length !== 7) return 'None'
-  for (let i = 0; i < 7; i++) {
-    const expectedDay = DAYS[i]
-    if (!LINE_RE.test(lines[i])) return 'None'
-    if (!lines[i].startsWith(expectedDay + ':')) return 'None'
-  }
-  return lines.join('\n')
-}
-
-/* Address extraction (cleaned & stricter) */
-// (Same as previous version... code omitted for brevity but unchanged. If you need it pasted again, let me know.)
-
-/* Phone extraction (US only, format + ext) */
-// (Same as previous version...)
-
-const SOCIAL_SITES = [
-  { key: 'Facebook', hosts: ['facebook.com','fb.com'], exclude: ['sharer.php','share','dialog/feed'] },
-  { key: 'Instagram', hosts: ['instagram.com'], exclude: [] },
-  { key: 'LinkedIn', hosts: ['linkedin.com'], exclude: ['shareArticle','sharing'] },
-  { key: 'X', hosts: ['x.com','twitter.com'], exclude: ['intent','share'] },
-  { key: 'TikTok', hosts: ['tiktok.com'], exclude: [] },
-  { key: 'YouTube', hosts: ['youtube.com'], exclude: ['share'], allowHostsExtra: ['youtu.be'] },
-  { key: 'Vimeo', hosts: ['vimeo.com'], exclude: [] },
-  { key: 'Flickr', hosts: ['flickr.com'], exclude: [] },
-  { key: 'Foursquare', hosts: ['foursquare.com'], exclude: [] },
-  { key: 'Threads', hosts: ['threads.net','threads.com'], exclude: [] },
-  { key: 'Tumblr', hosts: ['tumblr.com'], exclude: [] }
-]
-// (extractSocialMediaUrls unchanged...)
-
-function formatLicenses(raw) {
-  if (!raw) return 'None'
-  if (typeof raw === 'string') {
-    if (raw.trim().toLowerCase() === 'none') return 'None'
-    return raw.trim()
-  }
-  if (Array.isArray(raw)) {
-    const lines = raw.map(line=>String(line||'').trim()).filter(Boolean)
-    return lines.length ? lines.join('\n') : 'None'
-  }
-  return 'None'
-}
-
-/* BBB Seal on Website: scan HTMLs for "bbb" or "accredited" in images, or phrase "BBB Accredited" */
-function detectBBBSeal(htmls=[]) {
-  let found = false
-  for (const html of htmls) {
-    if (!html) continue
-    if (/src\s*=\s*["'][^"']*(bbb|accredited)[^"']*["']/i.test(html)) { found = true; break }
-    if (/bbb\s+accredited/i.test(html)) { found = true; break }
-  }
-  if (found) {
-    return 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
-  }
-  return 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
-}
-
-/* Email extraction */
-function extractEmails(corpus) {
-  if (!corpus) return 'None'
-  const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g
-  const found = new Set()
-  let m
-  while ((m = EMAIL_RE.exec(corpus)) !== null) {
-    const email = m[0]
-    // Exclude likely image files (e.g., "jpg@domain.com")
-    if (/\.(jpg|jpeg|png|gif|webp|svg)$/i.test(email)) continue
-    found.add(email)
-  }
-  return found.size ? Array.from(found).join('\n') : 'None'
-}
-
-/* Methods of Payment extraction */
-const PAYMENT_METHODS = [
-  "ACH",
-  "Amazon Payments",
-  "American Express",
-  "Apply Pay",
-  "Balance Adjustment",
-  "Bitcoin",
-  "Cash",
-  "Certified Check",
-  "China UnionPay",
-  "Coupon",
-  "Credit Card",
-  "Debit Car",
-  "Discover",
-  "Electronic Check",
-  "Financing",
-  "Google Pay",
-  "Invoice",
-  "MasterCard",
-  "Masterpass",
-  "Money Order",
-  "PayPal",
-  "Samsung Pay",
-  "Store Card",
-  "Venmo",
-  "Visa",
-  "Western Union",
-  "Wire Transfer",
-  "Zelle"
-]
-
-function extractPaymentMethods(corpus) {
-  if (!corpus) return 'None'
-  const found = new Set()
-  for (const method of PAYMENT_METHODS) {
-    const re = new RegExp(`\\b${method.replace(/\s+/g, '\\s+')}\\b`, 'i')
-    if (re.test(corpus)) found.add(method)
-  }
-  return found.size ? Array.from(found).join('\n') : 'None'
-}
-
-/* ==================== MAIN HANDLER ==================== */
-export default async function handler(req, res) {
-  if (req.method === 'OPTIONS') return res.status(204).end()
-  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
-
-  try {
-    const body = await readJsonBody(req)
-    const { url } = body || {}
-    if (!url) return res.status(400).send('Missing url')
-
-    let parsed
-    try {
-      parsed = new URL(url)
-      if (!/^https?:$/.test(parsed.protocol)) throw new Error('bad protocol')
-    } catch {
-      return res.status(400).send('Please enter a valid URL.')
-    }
-
-    // Crawl home + depth 1 pages only on same origin
-    const { text: corpus, hrefs: allHrefs, htmls } = await crawl(parsed.href)
-    if (!corpus || corpus.length < 40) {
-      return res.status(422).send('Could not extract enough content from the provided site.')
-    }
-
-    // --- PROMPT OMITTED for brevity (keep yours as before!) ---
-    const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
-Strictly follow these rules for each data point.
-INFORMATION SOURCE: Use ONLY the provided website content.
-EXCLUSIONS: Do not reference other businesses in the industry. Exclude owner names, locations, hours of operation, and time-related information unless asked for that data point. Avoid the characters * [ ].
-DO NOT INCLUDE: promotional or marketing words/phrases; trust/endorsement/popularity language. Do not make up information.
-GENERAL GUIDELINES: Return plain text or None for missing/empty fields. Avoid advertising claims, business history, or storytelling.
-
-OUTPUT JSON with these keys only:
-description, clientBase, ownerDemographic, productsAndServices, hoursOfOperation, addresses, phoneNumbers, socialMediaUrls, licenseNumbers.
-
-DETAILS FOR EACH DATA POINT:
-1) Business Description (description):
-  - Max 900 chars, factual, no advertising.
-  - Do not use the phrases "Business Description" or "for more information".
-  - TEMPLATE: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."
-
-2) Client Base (clientBase): One of 'residential', 'commercial', 'residential and commercial', 'government', 'non-profit'. Default: 'residential'.
-
-3) Owner Demographic (ownerDemographic): Return ONLY one of the following (exact, case-insensitive match, else 'None'):
-${OWNER_CATEGORIES.join(',\n')}
-
-4) Products and Services (productsAndServices): List as 1-4 word category labels (no numbers/bullets, no service areas, no marketing tone, no sample list, 'None' if not found).
-
-5) Hours of Operation (hoursOfOperation): Format:
-Monday: 09:00 AM - 05:00 PM
-Tuesday: 09:00 AM - 05:00 PM
-...
-Sunday: Closed
-If any day is missing, return None.
-
-6) Addresses (addresses): Extract each valid physical address. Three lines per address:
-123 Main St, Suite 400
-Boston, MA 02108
-US
-Multiple addresses: separate by single blank line. No P.O. Boxes. If not found, return None.
-
-7) Phone Number(s) (phoneNumbers): All valid US phone numbers in format:
-(123) 456-7890
-Or with extension: (123) 456-7890 ext. 1234
-One per line. None if not found.
-
-8) Social Media URLs (socialMediaUrls): For each platform, output as:
-Facebook: https://facebook.com/username
-...
-Only include if there is at least one path segment after the domain (e.g. facebook.com/username). Do not include root domains (e.g. facebook.com/).
-
-9) License Number(s) (licenseNumbers): For each license, output as:
-License Number: ABC-123456
-Issuing Authority: State of California Department of Consumer Affairs
-License Type: General Contractor
-Status: Active
-Expiration Date: 12/31/2025
-If any field is missing, omit the line. Multiple licenses: separate with blank line. If none, return None.
-
-JSON OUTPUT ONLY. Do not add extra keys, text, or explanations.`;
-
-    const userPrompt = `Website URL: ${parsed.href}
-
-WEBSITE CONTENT (verbatim, may be long):
-
-${corpus}
-
-HREFS (all links):
-${allHrefs.join('\n')}
-
-IMPORTANT: Ensure all outputs are factual, neutral, and comply with the data point instructions.`;
-
-    let aiRaw = await callOpenAI(systemPrompt, userPrompt)
-
-    // Parse JSON
-    let payload
-    try {
-      const jsonMatch = aiRaw.match(/\{[\s\S]*\}$/)
-      payload = JSON.parse(jsonMatch ? jsonMatch[0] : aiRaw)
-    } catch {
-      const fix = await callOpenAI(
-        'Return ONLY valid JSON with keys description, clientBase, ownerDemographic, productsAndServices, hoursOfOperation, addresses, phoneNumbers, socialMediaUrls, licenseNumbers. No explanations.',
-        `Please convert the following into strict JSON: ${aiRaw}`
-      )
-      payload = JSON.parse(fix)
-    }
-
-    // --- Clean up / enforce ---
-    let description = String(payload.description || '')
-    let clientBase = enforceClientBase(payload.clientBase)
-    let ownerDemographic = detectOwnerDemographic(payload.ownerDemographic)
-    let productsAndServices = cleanProductsAndServices(payload.productsAndServices)
-    let hoursOfOperation = normalizeHours(payload.hoursOfOperation)
-    let addresses = extractAddresses(corpus)
-    let phoneNumbers = extractPhones(corpus)
-    let socialMediaUrls = extractSocialMediaUrls(allHrefs)
-    let licenseNumbers = formatLicenses(payload.licenseNumbers)
-    let bbbSeal = detectBBBSeal(htmls)
-    let emailAddresses = extractEmails(corpus)
-    let paymentMethods = extractPaymentMethods(corpus)
-
-    description = stripExcluded(description)
-    if (badWordPresent(description)) {
-      const neutral = await callOpenAI(
-        'Neutralize promotional language and remove forbidden words/characters. Return ONLY the text, <=900 chars.',
-        description
-      )
-      description = neutral
-    }
-    description = sanitize(description)
-    if (badWordPresent(description)) {
-      for (const p of BANNED_PHRASES) {
-        const re = new RegExp(p, 'gi')
-        description = description.replace(re, '')
+      if (!res.ok) {
+        const text = await res.text()
+        if (res.status === 400 || res.status === 422) {
+          throw new Error(text || 'Please check the website URL and try again.')
+        } else {
+          console.error('Server error:', res.status, text)
+          throw new Error('We couldn’t generate a description right now. Please try another URL or try again later.')
+        }
       }
-      description = sanitize(description)
+      const data = await res.json()
+      setResult(data)
+    } catch (e) {
+      setError(e.message || 'Something went wrong. Please try again later.')
+    } finally {
+      setLoading(false)
     }
-
-    res.setHeader('Content-Type', 'application/json')
-    return res.status(200).send(JSON.stringify({
-      url: parsed.href,
-      description,
-      clientBase,
-      ownerDemographic,
-      productsAndServices,
-      hoursOfOperation,
-      addresses,
-      phoneNumbers,
-      socialMediaUrls,
-      licenseNumbers,
-      bbbSeal,
-      emailAddresses,
-      paymentMethods
-    }))
-  } catch (err) {
-    const code = err.statusCode || 500
-    return res.status(code).send(err.message || 'Internal Server Error')
   }
+
+  const handleReset = () => {
+    setUrl('')
+    setResult(null)
+    setError('')
+    if (inputRef.current) inputRef.current.focus()
+  }
+
+  return (
+    <div style={{ maxWidth: 860, margin: '40px auto', padding: '0 16px', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
+      {/* Header with BBB logo top-left */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
+        <img
+          src="/bbb-logo.png"
+          alt="BBB logo"
+          style={{ height: 40, width: 40, objectFit: 'contain' }}
+        />
+        <div>
+          <h1 style={{ fontSize: 28, margin: 0 }}>Obtain Information from Businesses Website for their BBB Business Profile</h1>
+          <p style={{ color: '#444', margin: 0 }}>
+            This will generate the text of the BBB Business Profile Description Overview, also known as About This Business. It will also generate data for Owner Demographic, Products/Services, Social Media URLs, Hours of Operation, Phone Number(s), Address, License Information, BBB Seal, Email Addresses, and Methods of Payment from the information on their website.
+          </p>
+        </div>
+      </div>
+
+      {/* Form */}
+      <UrlForm
+        onSubmit={handleSubmit}
+        loading={loading}
+        value={url}
+        onChange={setUrl}
+        inputRef={inputRef}
+      />
+
+      {/* Actions row */}
+      <div style={{ marginTop: 12 }}>
+        <button
+          type="button"
+          onClick={handleReset}
+          disabled={loading && !error}
+          style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #bbb', background: '#f7f7f7', cursor: 'pointer' }}
+        >
+          Start Again
+        </button>
+      </div>
+
+      {/* Errors */}
+      {error && (
+        <div style={{ color: 'red', marginTop: 16 }}>{error}</div>
+      )}
+
+      {/* Loading */}
+      {loading && (
+        <div style={{ marginTop: 16 }}>Processing…</div>
+      )}
+
+      {/* Results */}
+      {result && (
+        <div style={{ marginTop: 32, borderTop: '1px solid #ddd', paddingTop: 24 }}>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Website URL:</strong><br />
+            <span>{result.url}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Business Description:</strong>
+            <p style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>
+              {result.description} {`The business provides services to ${result.clientBase} customers.`}
+            </p>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Client Base:</strong><br />
+            <span>{result.clientBase}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Owner Demographic:</strong><br />
+            <span>{result.ownerDemographic}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Products and Services:</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.productsAndServices}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Hours of Operation:</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.hoursOfOperation}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Address(es):</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.addresses}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Phone Number(s):</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.phoneNumbers}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Social Media URLs:</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.socialMediaUrls}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>License Number(s):</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.licenseNumbers}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>BBB Seal on Website:</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.bbbSeal}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Email Addresses:</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.emailAddresses}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Methods of Payment:</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.paymentMethods}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
