@@ -191,7 +191,7 @@ function normalizeHours(raw) {
   return lines.join('\n')
 }
 
-/* Address extraction (cleaned & stricter) ... unchanged from previous post ... */
+/* Address extraction (cleaned & stricter) */
 const STREET_TYPES = [
   'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr','Lane','Ln','Court','Ct','Circle','Cir',
   'Way','Parkway','Pkwy','Place','Pl','Terrace','Ter','Highway','Hwy','Route','Rte','Trail','Trl','Center','Ctr'
@@ -377,24 +377,33 @@ function formatLicenses(raw) {
   return 'None'
 }
 
-/* -------------- BBB Seal Detection (NEW) -------------- */
+/* BBB Seal on Website: scan HTMLs for "bbb" or "accredited" in images, or phrase "BBB Accredited" */
 function detectBBBSeal(htmls=[]) {
   let found = false
   for (const html of htmls) {
     if (!html) continue
-    // Look for image src or filenames containing "bbb" or "accredited"
-    if (/src\s*=\s*["'][^"']*(bbb|accredited)[^"']*["']/i.test(html)) {
-      found = true; break
-    }
-    // Look for phrase "BBB Accredited" anywhere
-    if (/bbb\s+accredited/i.test(html)) {
-      found = true; break
-    }
+    if (/src\s*=\s*["'][^"']*(bbb|accredited)[^"']*["']/i.test(html)) { found = true; break }
+    if (/bbb\s+accredited/i.test(html)) { found = true; break }
   }
   if (found) {
     return 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
   }
   return 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
+}
+
+/* Email extraction */
+function extractEmails(corpus) {
+  if (!corpus) return 'None'
+  const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g
+  const found = new Set()
+  let m
+  while ((m = EMAIL_RE.exec(corpus)) !== null) {
+    const email = m[0]
+    // Exclude likely image files (e.g., "jpg@domain.com")
+    if (/\.(jpg|jpeg|png|gif|webp|svg)$/i.test(email)) continue
+    found.add(email)
+  }
+  return found.size ? Array.from(found).join('\n') : 'None'
 }
 
 /* ==================== MAIN HANDLER ==================== */
@@ -421,7 +430,7 @@ export default async function handler(req, res) {
       return res.status(422).send('Could not extract enough content from the provided site.')
     }
 
-    // --- Prompt ---
+    // --- PROMPT OMITTED for brevity (keep yours as before!) ---
     const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
 Strictly follow these rules for each data point.
 INFORMATION SOURCE: Use ONLY the provided website content.
@@ -515,6 +524,7 @@ IMPORTANT: Ensure all outputs are factual, neutral, and comply with the data poi
     let socialMediaUrls = extractSocialMediaUrls(allHrefs)
     let licenseNumbers = formatLicenses(payload.licenseNumbers)
     let bbbSeal = detectBBBSeal(htmls)
+    let emailAddresses = extractEmails(corpus)
 
     description = stripExcluded(description)
     if (badWordPresent(description)) {
@@ -545,7 +555,8 @@ IMPORTANT: Ensure all outputs are factual, neutral, and comply with the data poi
       phoneNumbers,
       socialMediaUrls,
       licenseNumbers,
-      bbbSeal
+      bbbSeal,
+      emailAddresses
     }))
   } catch (err) {
     const code = err.statusCode || 500
