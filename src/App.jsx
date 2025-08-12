@@ -56,7 +56,7 @@ export default function App() {
         <div>
           <h1 style={{ fontSize: 28, margin: 0 }}>Obtain Information from Businesses Website for their BBB Business Profile</h1>
           <p style={{ color: '#444', margin: 0 }}>
-            This will generate the text of the BBB Business Profile Description Overview, also known as About This Business. It will also generate data for Owner Demographic, Products/Services, Social Media URLs, Hours of Operation, Phone Number(s), Address, License Information, BBB Seal, and Email Addresses from the information on their website.
+            This will generate the text of the BBB Business Profile Description Overview, also known as About This Business. It will also generate data for Owner Demographic, Products/Services, Social Media URLs, Hours of Operation, Phone Number(s), Address, License Information, BBB Seal, Email Addresses, and Methods of Payment from the information on their website.
           </p>
         </div>
       </div>
@@ -144,6 +144,10 @@ export default function App() {
           <div style={{ marginBottom: 16 }}>
             <strong>Email Addresses:</strong><br />
             <span style={{ whiteSpace: 'pre-wrap' }}>{result.emailAddresses}</span>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <strong>Methods of Payment:</strong><br />
+            <span style={{ whiteSpace: 'pre-wrap' }}>{result.paymentMethods}</span>
           </div>
         </div>
       )}
