@@ -45,7 +45,12 @@ export default function App() {
   }
 
   return (
-    <div style={{ maxWidth: 900, margin: '40px auto', padding: '0 16px', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
+    <div style={{
+      maxWidth: 900,
+      margin: '40px auto',
+      padding: '0 16px',
+      fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial'
+    }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
         <img
@@ -94,18 +99,25 @@ export default function App() {
 
       {/* Results */}
       {result && (
-        <div style={{ marginTop: 36, borderTop: '1px solid #ddd', paddingTop: 28, fontSize: 17, lineHeight: 1.5 }}>
+        <div style={{
+          marginTop: 36,
+          borderTop: '1px solid #ddd',
+          paddingTop: 28,
+          fontSize: 17,
+          lineHeight: 1.5,
+          fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial'
+        }}>
           <div style={{ marginBottom: 15 }}>
             <strong>Website URL:</strong>
             <br /><span>{result.url}</span>
           </div>
           <div style={{ marginBottom: 15 }}>
             <strong>Business Description:</strong>
-            <p style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>{result.description}</p>
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <strong>Client Base:</strong>
-            <br /><span>{result.clientBase}</span>
+            <p style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>
+              {result.description
+                ? `${result.description} The business provides services to ${result.clientBase} customers.`
+                : ''}
+            </p>
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>Owner Demographic:</strong>
@@ -117,40 +129,45 @@ export default function App() {
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>Hours of Operation:</strong>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.hoursOfOperation}</pre>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.hoursOfOperation || 'None'}</pre>
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>Address(es):</strong>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.addresses}</pre>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.addresses || 'None'}</pre>
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>Phone Number(s):</strong>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.phoneNumbers}</pre>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.phoneNumbers || 'None'}</pre>
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>Social Media URLs:</strong>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.socialMediaUrls}</pre>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.socialMediaUrls || 'None'}</pre>
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>License Number(s):</strong>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.licenseNumbers}</pre>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.licenseNumbers || 'None'}</pre>
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>Email Addresses:</strong>
-            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.emailAddresses}</pre>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{result.emailAddresses || 'None'}</pre>
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>Methods of Payment:</strong>
-            <br /><span>{result.methodsOfPayment}</span>
+            <br /><span>{result.methodsOfPayment || 'None'}</span>
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>BBB Seal on Website:</strong>
             <br />
-            <span dangerouslySetInnerHTML={{ __html: result.bbbSeal }} />
+            {/* If NOT FOUND, show in red, else default */}
+            {result.bbbSeal && result.bbbSeal.startsWith('NOT FOUND') ? (
+              <span style={{ color: 'red' }}>{result.bbbSeal}</span>
+            ) : (
+              <span dangerouslySetInnerHTML={{ __html: result.bbbSeal || '' }} />
+            )}
           </div>
           <div style={{ marginBottom: 12 }}>
             <strong>Service Area:</strong>
-            <br /><span>{result.serviceArea}</span>
+            <br /><span>{result.serviceArea || 'None'}</span>
           </div>
         </div>
       )}
