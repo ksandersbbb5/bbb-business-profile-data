@@ -3,7 +3,6 @@ import * as cheerio from 'cheerio'
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
-// -- Helper functions --
 async function readJsonBody(req) {
   if (req.body && typeof req.body === 'object') return req.body
   const chunks = []
@@ -16,21 +15,15 @@ const ALLOWED_CLIENT_BASE = new Set([
   'residential', 'commercial', 'residential and commercial', 'government', 'non-profit'
 ])
 
-const ALLOWED_OWNER_DEMOGRAPHICS = [
-  'Asian American Owned', 'Black/African American Owned', 'African American Owned', 'Black Owned', 'Disabled Owned',
-  'Employee Owned Owned', 'Family Owned', 'Family-Owned', 'First Responder Owned', 'Hispanic Owned', 'Indigenous Owned',
-  'LBGTQ Owned', 'Middle Eastern Owned', 'Minority Owned', 'Native American Owned', 'Pacific Owned', 'Veteran Owned', 'Woman Owned'
-]
-
-const ALLOWED_PAYMENT_METHODS = [
-  'ACH', 'Amazon Payments', 'American Express', 'Apply Pay', 'Balance Adjustment', 'Bitcoin', 'Cash', 'Certified Check',
-  'China UnionPay', 'Coupon', 'Credit Card', 'Debit Car', 'Discover', 'Electronic Check', 'Financing', 'Google Pay', 'Invoice',
-  'MasterCard', 'Masterpass', 'Money Order', 'PayPal', 'Samsung Pay', 'Store Card', 'Venmo', 'Visa', 'Western Union',
-  'Wire Transfer', 'Zelle'
+const APPROVED_PAYMENT_METHODS = [
+  'ACH', 'Amazon Payments', 'American Express', 'Apply Pay', 'Balance Adjustment',
+  'Bitcoin', 'Cash', 'Certified Check', 'China UnionPay', 'Coupon', 'Credit Card',
+  'Debit Car', 'Discover', 'Electronic Check', 'Financing', 'Google Pay', 'Invoice',
+  'MasterCard', 'Masterpass', 'Money Order', 'PayPal', 'Samsung Pay', 'Store Card',
+  'Venmo', 'Visa', 'Western Union', 'Wire Transfer', 'Zelle'
 ]
 
 const BANNED_PHRASES = [
-  // ... same as your list ...
   'warranties','warranty','guarantee','guaranteed','quality','needs','free','reliable','premier','expert','experts','best','unique','peace of mind','largest','top','selection','ultimate','consultation','skilled','known for','prominent','paid out','commitment','Experts at','Experts in','Cost effective','cost saving','Ensuring efficiency','Best at','best in','Ensuring','Excels','Rely on us',
   'trusted by','relied on by','endorsed by','preferred by','backed by',
   'Free','Save','Best','New','Limited','Exclusive','Instant','Now','Proven','Sale','Bonus','Act Fast','Unlock'
@@ -64,6 +57,7 @@ async function crawl(rootUrl) {
   const visited = new Set()
   const queue = [start.href]
   const texts = []
+  const rawHtmls = []
 
   while (queue.length) {
     const current = queue.shift()
@@ -71,6 +65,7 @@ async function crawl(rootUrl) {
     visited.add(current)
     try {
       const html = await fetchHtml(current)
+      rawHtmls.push(html)
       const text = extractVisibleText(html)
       if (text) texts.push(text)
       const $ = cheerio.load(html)
@@ -87,7 +82,54 @@ async function crawl(rootUrl) {
       })
     } catch {}
   }
-  return texts.join('\n\n')
+  return {
+    text: texts.join('\n\n'),
+    html: rawHtmls.join('\n\n<!--PAGEBREAK-->\n\n')
+  }
+}
+
+// --- social media extraction (cheerio, stricter path check) ---
+function extractSocialUrls(allHtml) {
+  const $ = cheerio.load(allHtml)
+  const found = []
+  const patterns = [
+    { label: 'Facebook', rx: /^https?:\/\/(www\.)?facebook\.com\/([^/?#]+)[^?#]*$/i },
+    { label: 'Instagram', rx: /^https?:\/\/(www\.)?instagram\.com\/([^/?#]+)[^?#]*$/i },
+    { label: 'LinkedIn', rx: /^https?:\/\/(www\.)?linkedin\.com\/(company|in)\/([^/?#]+)[^?#]*$/i },
+    { label: 'X', rx: /^https?:\/\/(www\.)?(twitter\.com|x\.com)\/([^/?#]+)[^?#]*$/i },
+    { label: 'TikTok', rx: /^https?:\/\/(www\.)?tiktok\.com\/(@|user\/)?([^/?#]+)[^?#]*$/i },
+    { label: 'YouTube', rx: /^https?:\/\/(www\.)?youtube\.com\/(user|channel|c|embed)\/([^/?#]+)[^?#]*$/i },
+    { label: 'Vimeo', rx: /^https?:\/\/(www\.)?vimeo\.com\/([^/?#]+)[^?#]*$/i },
+    { label: 'Flickr', rx: /^https?:\/\/(www\.)?flickr\.com\/([^/?#]+)[^?#]*$/i },
+    { label: 'Foursquare', rx: /^https?:\/\/(www\.)?foursquare\.com\/([^/?#]+)[^?#]*$/i },
+    { label: 'Threads', rx: /^https?:\/\/(www\.)?threads\.net\/([^/?#]+)[^?#]*$/i },
+    { label: 'Tumblr', rx: /^https?:\/\/(www\.)?tumblr\.com\/([^/?#]+)[^?#]*$/i }
+  ]
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href')
+    if (!href) return
+    for (const { label, rx } of patterns) {
+      if (rx.test(href)) {
+        found.push(`${label}: ${href}`)
+        return
+      }
+    }
+  })
+  return found.length ? found.join('\n') : 'None'
+}
+
+// --- address extraction (basic US format) ---
+function extractAddresses(text) {
+  // Simple US address regex (street, city, state, ZIP)
+  const rx = /(\d{1,5}(?: [A-Za-z0-9\.\#\-]+)+)[, ]+\s*([A-Za-z\s]+),?\s*([A-Z]{2})\s*(\d{5})(?:[\-, ]+)?(US|United States)?/gi
+  const addresses = []
+  let match
+  while ((match = rx.exec(text))) {
+    const [_, street, city, state, zip] = match
+    let country = 'US'
+    addresses.push(`${street}\n${city}, ${state} ${zip}\n${country}`)
+  }
+  return addresses.length ? addresses.join('\n\n') : 'None'
 }
 
 async function callOpenAI(systemPrompt, userPrompt) {
@@ -137,49 +179,6 @@ function stripExcluded(text) {
   return t
 }
 
-// -- Data point post-processors --
-function dedupList(items) {
-  return Array.from(new Set(items.map(i => i.trim()).filter(Boolean)))
-}
-
-function fixProductsAndServices(str) {
-  // Remove anything after a period or new line that is not a list
-  if (!str) return 'None'
-  // Remove numbers/phone/offers/extra
-  let parts = str.split(/,|\n/).map(s => s.trim()).filter(s =>
-    s.length > 0 &&
-    s.length < 40 &&
-    !/\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/.test(s) && // not a phone
-    !/offer|call|message|email|contact|estimate|price|free|saving|financ/i.test(s)
-  )
-  parts = parts.map(s =>
-    s.split(' ')
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join(' ')
-  )
-  return dedupList(parts).join(', ') || 'None'
-}
-function dedupAndFormatPhones(str) {
-  if (!str) return 'None'
-  let nums = str.match(/\(\d{3}\) \d{3}-\d{4}( ext\. \d+)?/g)
-  return dedupList(nums || []).join('\n') || 'None'
-}
-function filterSocialUrls(lines) {
-  if (!lines) return 'None'
-  let socials = lines
-    .split('\n')
-    .map(x => x.trim())
-    .filter(x => /^(Facebook|Instagram|LinkedIn|X|TikTok|YouTube|Vimeo|Flickr|Foursquare|Threads|Tumblr):\s*https?:\/\/[^\s]+/i.test(x))
-    .filter(x => !/\/(sharer|intent|embed|showcase|home|about|videos|posts)?(?:[/?]|$)/i.test(x)) // no generic/intent/share etc.
-    .filter(x => /https?:\/\/[^\/]+\/[^\/]+/i.test(x)) // must have a path segment after domain
-  return dedupList(socials).join('\n') || 'None'
-}
-function cleanEmails(str) {
-  if (!str) return 'None'
-  const emails = str.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g)
-  return dedupList(emails || []).join('\n') || 'None'
-}
-
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end()
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
@@ -197,61 +196,62 @@ export default async function handler(req, res) {
       return res.status(400).send('Please enter a valid URL.')
     }
 
-    const corpus = await crawl(parsed.href)
+    // Crawl for text and html
+    const crawlResult = await crawl(parsed.href)
+    const corpus = crawlResult.text
+    const allHtml = crawlResult.html
+
     if (!corpus || corpus.length < 40) {
       return res.status(422).send('Could not extract enough content from the provided site.')
     }
 
-    // --- COMBINED PROMPT ---
+    // --- Compose the system prompt as described ---
     const systemPrompt = `
-You are a BBB representative enhancing a BBB Business Profile. Use ONLY the provided website content.
-EXCLUSIONS: No promotional words/phrases, trust/endorsement, advertising, offers, owner names, locations, time, or history.
-Avoid: *, [, ], and output fields strictly per instructions. Return "None" (no quotes) if a value can't be found.
+You are a BBB representative enhancing a BBB Business Profile. Strictly follow these rules when writing the Business Description and extracting all other fields.
+INFORMATION SOURCE: Use ONLY the provided website content.
+EXCLUSIONS: Do not reference other businesses in the industry. Exclude owner names, locations, hours of operation, and time-related information from the description field. Avoid the characters * [ ].
+DO NOT INCLUDE: the text “Business Description” or any variation; the phrase “for more information visit their website…” or any variation; links to any websites; promotional words/phrases; any wording implying trust/endorsement/popularity.
+GENERAL GUIDELINES: Max 900 characters; factual; no advertising claims, business history, or storytelling.
+TEMPLATE: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."
+OUTPUT: Return a strict JSON object with the following keys:
+- description (string)
+- clientBase (one of: residential, commercial, residential and commercial, government, non-profit)
+- ownerDemographic (see below)
+- productsAndServices (see below)
+- hoursOfOperation (see below)
+- addresses (see below)
+- phoneNumbers (see below)
+- socialMediaUrls (see below)
+- licenseNumbers (see below)
+- emailAddresses (see below)
+- methodsOfPayment (see below)
+- bbbSeal (see below)
+- serviceArea (see below)
 
-Respond with a JSON object:
-{
-"description": <see template below>,
-"clientBase": <residential|commercial|residential and commercial|government|non-profit>,
-"ownerDemographic": <from approved list or 'None'>,
-"productsAndServices": <comma-separated, category-style, each word capitalized, no sentences, max 20 items, 'None' if empty>,
-"hoursOfOperation": <format below or 'None'>,
-"addresses": <see instructions; each address as 3 lines, blank line between>,
-"phoneNumbers": <all valid US phone numbers formatted (XXX) XXX-XXXX [ext. 1234] each on new line, deduped, 'None' if none>,
-"socialMediaUrls": <valid social URLs only as instructed, 1 per line, deduped, 'None' if none>,
-"licenseNumbers": <see licensing instructions; each license as multiline, blank line between, 'None' if none>,
-"emailAddresses": <all valid emails, 1 per line, 'None' if none>,
-"methodsOfPayment": <comma-separated from approved list, each capitalized, no sentences, 'None' if none>,
-"bbbSeal": <'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.' | 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'>,
-"serviceArea": <comma-separated list of cities/counties/states/zips or 'None'>
-}
+Specific Instructions for each key:
+1. description: See above instructions.
+2. clientBase: Only output one of the allowed values.
+3. ownerDemographic: Use exact-match logic as previously provided.
+4. productsAndServices: List all products/services as a comma-separated list. The first letter of each word should be capitalized (e.g., 'Landscape Design, Irrigation Systems'). Do NOT make up or guess products or services. If none are found, output 'None'.
+5. hoursOfOperation: Only extract if there is explicit data for all days of the week, using the format "Monday: 09:00 AM - 05:00 PM". If no explicit hours for all days, output 'None'. Do not guess or invent hours of operation.
+6. addresses: Extract only valid, physical addresses with street, city, state, and zip (no PO Boxes). If none, output 'None'.
+7. phoneNumbers: Extract only valid US phone numbers. Format as (XXX) XXX-XXXX. If none, output 'None'.
+8. socialMediaUrls: Extract only social media URLs that are not root domains (e.g., facebook.com/username is valid, but facebook.com/ is not). If none, output 'None'.
+9. licenseNumbers: See previous licensing instructions.
+10. emailAddresses: Extract valid email addresses. If none, output 'None'.
+11. methodsOfPayment: Only list from the approved list. If none, output 'None'.
+12. bbbSeal: If a BBB seal image or "BBB Accredited" phrase is found, output: "FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited." If not found, output: "NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website." (If NOT FOUND, output must be shown in red on the frontend.)
+13. serviceArea: Extract any service area details (city, county, state, zip). If none, output 'None'.
 
-DESCRIPTION TEMPLATE: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."
-- Max 900 chars. No promotional/ad/offer words, no owner names, no storytelling, no forbidden characters.
+DO NOT GUESS or make up any data. Return "None" for any field where no explicit information is found.
+`
 
-PRODUCTS/SERVICES: Comma-separated, category-style, 1–4 words each, each word capitalized. Do NOT use offers, phone, address, or sentences. If none, 'None'. Example: "Landscaping Design, Landscape Maintenance, Irrigation Systems"
+    const userPrompt = `Website URL: ${parsed.href}
+WEBSITE CONTENT (verbatim, may be long):
 
-OWNER DEMOGRAPHIC: Only return a value from the approved list if the input matches exactly, else 'None'.
+${corpus}
 
-HOURS: For each day, in 12-hour format, e.g. "Monday: 09:00 AM - 05:00 PM". Use "Closed" for closed days. If any day is missing, output 'None'.
-
-ADDRESSES: Extract valid US/Intl addresses only, each as three lines (see instructions), blank line between, or 'None'.
-
-PHONE: US phone numbers only, deduped, (XXX) XXX-XXXX [ext. 1234] each on a new line, or 'None'.
-
-SOCIALS: List only if there is at least one path segment after domain (e.g., facebook.com/username). Do NOT list generic, share, intent, embed, or root domain links. One per line, deduped, 'None' if none.
-
-LICENSING: Each license number as multiline (see example), blank line between, or 'None'.
-
-EMAIL: All valid emails found, 1 per line, or 'None'.
-
-METHODS OF PAYMENT: Only from the approved list, comma-separated, each capitalized. No extra text or sentences. If none found, 'None'.
-
-BBB SEAL: Output 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.' if an image filename contains "bbb" or "accredited" or the phrase is found, else 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
-
-SERVICE AREA: Comma-separated list of service areas (cities/counties/states/zips), no sentences, or 'None'.
-    `.trim()
-
-    const userPrompt = `Website URL: ${parsed.href}\n\nWEBSITE CONTENT:\n${corpus}`
+IMPORTANT: Ensure your description (<=900 chars) contains no promotional language and no forbidden words/characters. Determine clientBase from the content and sentiment, choosing exactly one of the allowed options. Extract all fields per the guidelines above.`
 
     let aiRaw = await callOpenAI(systemPrompt, userPrompt)
     let payload
@@ -260,61 +260,62 @@ SERVICE AREA: Comma-separated list of service areas (cities/counties/states/zips
       payload = JSON.parse(jsonMatch ? jsonMatch[0] : aiRaw)
     } catch {
       const fix = await callOpenAI(
-        'Return ONLY valid JSON with the requested keys, nothing else.',
-        `Please convert the following into strict JSON: ${aiRaw}`
+        'Return ONLY valid JSON with the specified keys and correct values, nothing else.',
+        `Please convert the following into strict JSON (no extra text): ${aiRaw}`
       )
       payload = JSON.parse(fix)
     }
 
-    // -- POSTPROCESSING --
-    let {
-      description, clientBase, ownerDemographic, productsAndServices, hoursOfOperation,
-      addresses, phoneNumbers, socialMediaUrls, licenseNumbers, emailAddresses, methodsOfPayment, bbbSeal, serviceArea
-    } = payload
+    // Address fallback: if the model fails, do a direct parse
+    if (!payload.addresses || payload.addresses === 'None') {
+      const extractedAddrs = extractAddresses(corpus)
+      if (extractedAddrs !== 'None') payload.addresses = extractedAddrs
+    }
 
-    // Remove forbidden words/chars from all fields as needed
-    description = sanitize(stripExcluded(description))
+    // Social media fallback: model often misses, so check HTML
+    if (!payload.socialMediaUrls || payload.socialMediaUrls === 'None') {
+      const sm = extractSocialUrls(allHtml)
+      if (sm && sm !== 'None') payload.socialMediaUrls = sm
+    }
+
+    // Description strip, sanitize
+    let description = String(payload.description || '')
+    description = stripExcluded(description)
     if (badWordPresent(description)) {
       const neutral = await callOpenAI(
         'Neutralize promotional language and remove forbidden words/characters. Return ONLY the text, <=900 chars.',
         description
       )
-      description = sanitize(neutral)
+      description = neutral
+    }
+    description = sanitize(description)
+    if (badWordPresent(description)) {
+      for (const p of BANNED_PHRASES) {
+        const re = new RegExp(p, 'gi')
+        description = description.replace(re, '')
+      }
+      description = sanitize(description)
     }
 
-    clientBase = enforceClientBase(clientBase)
-    ownerDemographic = ALLOWED_OWNER_DEMOGRAPHICS.includes(ownerDemographic) ? ownerDemographic : 'None'
-    productsAndServices = fixProductsAndServices(productsAndServices)
-    phoneNumbers = dedupAndFormatPhones(phoneNumbers)
-    socialMediaUrls = filterSocialUrls(socialMediaUrls)
-    emailAddresses = cleanEmails(emailAddresses)
-    methodsOfPayment = fixProductsAndServices(methodsOfPayment) // reuse capitalization/dedup logic
-    // BBB Seal: add red color if NOT FOUND
-    if (typeof bbbSeal === 'string' && bbbSeal.startsWith('NOT FOUND')) {
-      bbbSeal = `<span style="color:red">${bbbSeal}</span>`
-    }
-    // Service Area: remove sentences, just comma-separated list
-    if (typeof serviceArea === 'string') {
-      serviceArea = serviceArea.split(/[.\n;]/)[0]
-    }
+    // Final build
+    payload.description = description
+    payload.clientBase = enforceClientBase(payload.clientBase)
+    if (!payload.ownerDemographic) payload.ownerDemographic = 'None'
+    if (!payload.productsAndServices) payload.productsAndServices = 'None'
+    if (!payload.hoursOfOperation) payload.hoursOfOperation = 'None'
+    if (!payload.addresses) payload.addresses = 'None'
+    if (!payload.phoneNumbers) payload.phoneNumbers = 'None'
+    if (!payload.socialMediaUrls) payload.socialMediaUrls = 'None'
+    if (!payload.licenseNumbers) payload.licenseNumbers = 'None'
+    if (!payload.emailAddresses) payload.emailAddresses = 'None'
+    if (!payload.methodsOfPayment) payload.methodsOfPayment = 'None'
+    if (!payload.bbbSeal) payload.bbbSeal = 'None'
+    if (!payload.serviceArea) payload.serviceArea = 'None'
 
-    // Send output
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
       url: parsed.href,
-      description,
-      clientBase,
-      ownerDemographic,
-      productsAndServices,
-      hoursOfOperation,
-      addresses,
-      phoneNumbers,
-      socialMediaUrls,
-      licenseNumbers,
-      emailAddresses,
-      methodsOfPayment,
-      bbbSeal,
-      serviceArea
+      ...payload
     }))
   } catch (err) {
     const code = err.statusCode || 500
