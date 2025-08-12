@@ -1,9 +1,11 @@
 // /api/generate.js (Vercel serverless function - Node ESM)
 import * as cheerio from 'cheerio'
 
+// ====== Config ======
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 
+// ====== Helpers ======
 async function readJsonBody(req) {
   if (req.body && typeof req.body === 'object') return req.body
   const chunks = []
@@ -18,7 +20,7 @@ function pathLevel(u) { return u.pathname.split('/').filter(Boolean).length }
 async function fetchHtml(url) {
   const res = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 BBB Profile Scraper',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) BBB Profile Scraper',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9'
     }
@@ -27,7 +29,7 @@ async function fetchHtml(url) {
   return await res.text()
 }
 
-function extractVisibleText(html) {
+function extractTextNoScripts(html) {
   const $ = cheerio.load(html)
   $('script, style, noscript, svg, iframe').remove()
   return $('body').text()
@@ -38,56 +40,85 @@ function extractVisibleText(html) {
     .trim()
 }
 
+function extractJsonLd(html) {
+  const $ = cheerio.load(html)
+  const blocks = []
+  $('script[type="application/ld+json"]').each((_, el) => {
+    const raw = $(el).contents().text()
+    if (!raw) return
+    try {
+      const data = JSON.parse(raw)
+      blocks.push(data)
+    } catch {}
+  })
+  return blocks
+}
+
 async function crawl(rootUrl) {
   const start = new URL(rootUrl)
   const visited = new Set()
   const queue = [start.href]
   const texts = []
   const htmls = []
+  const jsonlds = []
 
-  while (queue.length) {
+  // up to 30 pages, allow depth 2
+  const MAX_PAGES = 30
+  while (queue.length && htmls.length < MAX_PAGES) {
     const current = queue.shift()
     if (visited.has(current)) continue
     visited.add(current)
     try {
       const html = await fetchHtml(current)
       htmls.push({ url: current, html })
-      const text = extractVisibleText(html)
+
+      const ld = extractJsonLd(html)
+      if (ld.length) jsonlds.push({ url: current, jsonld: ld })
+
+      const text = extractTextNoScripts(html)
       if (text) texts.push(text)
 
       const $ = cheerio.load(html)
       $('a[href]').each((_, el) => {
+        if (htmls.length >= MAX_PAGES) return
+        const href = $(el).attr('href')
+        if (!href) return
         try {
-          const href = $(el).attr('href')
-          if (!href) return
           const abs = new URL(href, start.href)
           if (!sameOrigin(start, abs)) return
-          if (pathLevel(abs) <= 2) {
-            if (!visited.has(abs.href) && queue.length < 30) queue.push(abs.href)
+          const depth = pathLevel(abs)
+          if (depth <= 2 && !visited.has(abs.href) && queue.length < MAX_PAGES) {
+            queue.push(abs.href)
           }
         } catch {}
       })
     } catch {}
   }
 
-  // Fallback slugs for thin sites
-  const FALLBACK = ['about','about-us','contact','locations','hours','menu','store-locator','privacy','legal']
-  for (const slug of FALLBACK) {
-    try {
-      const u = new URL(rootUrl)
-      u.pathname = `/${slug}`
-      if (!visited.has(u.href)) {
-        const html = await fetchHtml(u.href)
-        htmls.push({ url: u.href, html })
-        const text = extractVisibleText(html)
+  // If corpus is very thin, try common slugs
+  const corpus = texts.join('\n\n')
+  const PAGES_SET = new Set(htmls.map(p => p.url))
+  const FALLBACKS = ['about', 'about-us', 'contact', 'locations', 'hours', 'menu', 'store-locator']
+  if (corpus.length < 200) {
+    for (const slug of FALLBACKS) {
+      const url = new URL(`/${slug.replace(/^\//,'')}/`, rootUrl).href
+      if (PAGES_SET.has(url)) continue
+      try {
+        const html = await fetchHtml(url)
+        htmls.push({ url, html })
+        const ld = extractJsonLd(html)
+        if (ld.length) jsonlds.push({ url, jsonld: ld })
+        const text = extractTextNoScripts(html)
         if (text) texts.push(text)
-      }
-    } catch {}
+      } catch {}
+      if (htmls.length >= MAX_PAGES) break
+    }
   }
 
-  return { corpus: texts.join('\n\n'), pages: htmls }
+  return { corpus: texts.join('\n\n'), pages: htmls, jsonldPages: jsonlds }
 }
 
+// ====== Utilities ======
 function uniq(arr) { return [...new Set((arr || []).filter(Boolean))] }
 function ensureHeaderBlocks(str) {
   return String(str || '')
@@ -96,92 +127,12 @@ function ensureHeaderBlocks(str) {
     .trim()
 }
 
-// ===== JSON-LD harvesting (addresses, phones, hours, social) =====
-function extractFromJsonLd(pages) {
-  const addresses = []
-  const phones = []
-  const socials = []
-  const hours = [] // we’ll keep raw; main hours logic remains model/corpus-based
-
-  for (const { html } of pages) {
-    const $ = cheerio.load(html)
-    $('script[type="application/ld+json"]').each((_, el) => {
-      let raw = $(el).contents().text()
-      if (!raw) return
-      // Some sites concatenate multiple JSON objects; try to parse arrays or split braces safely
-      const tryParse = (s) => {
-        try { return JSON.parse(s) } catch { return null }
-      }
-      let data = tryParse(raw)
-      if (!data) {
-        // attempt to wrap multiple roots into an array
-        const guess = `[${raw.replace(/}\s*{"/g, '},{\"')}]`
-        data = tryParse(guess)
-      }
-      if (!data) return
-
-      const items = Array.isArray(data) ? data : [data]
-      for (const item of items) {
-        const stack = [item]
-        while (stack.length) {
-          const node = stack.pop()
-          if (!node || typeof node !== 'object') continue
-
-          const type = (node['@type'] || node.type || '').toString()
-          if (/LocalBusiness|Organization|Restaurant|Store|ProfessionalService|HomeAndConstructionBusiness/i.test(type)) {
-            // Address
-            const addr = node.address
-            if (addr && typeof addr === 'object') {
-              const street = [addr.streetAddress, addr.suite, addr.postOfficeBoxNumber].filter(Boolean).join(', ').trim()
-              const city = (addr.addressLocality || '').trim()
-              const region = (addr.addressRegion || '').trim()
-              const postal = (addr.postalCode || '').trim()
-              let country = (addr.addressCountry || '').toString().trim()
-              if (!country) country = 'USA'
-              if (/^US$/i.test(country)) country = 'USA'
-              if (street && city && region && postal) {
-                addresses.push(`${street}\n${city}, ${region} ${postal}\n${country}`)
-              }
-            }
-            // Phones
-            if (typeof node.telephone === 'string') phones.push(node.telephone)
-            if (Array.isArray(node.telephone)) phones.push(...node.telephone.filter(Boolean))
-
-            // SameAs (social)
-            const sameAs = node.sameAs
-            if (typeof sameAs === 'string') socials.push(sameAs)
-            else if (Array.isArray(sameAs)) socials.push(...sameAs.filter(Boolean))
-
-            // Hours (keep raw for now)
-            const oh = node.openingHoursSpecification
-            if (oh) hours.push(JSON.stringify(oh))
-          }
-
-          // Traverse nested
-          Object.values(node).forEach(v => {
-            if (v && typeof v === 'object') {
-              if (Array.isArray(v)) v.forEach(x => stack.push(x))
-              else stack.push(v)
-            }
-          })
-        }
-      }
-    })
-  }
-
-  return {
-    addresses: uniq(addresses),
-    phones: uniq(phones),
-    socials: uniq(socials),
-    hoursRaw: uniq(hours)
-  }
-}
-
-// ===== email, phone, address, social (existing) =====
+// ====== Email ======
 function extractEmails(text) {
   return uniq(text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [])
 }
 
+// ====== Phones (strict NANP) ======
 function isValidNanp(area, exch, line) {
   return /^[2-9]\d{2}$/.test(area) && /^[2-9]\d{2}$/.test(exch) && /^\d{4}$/.test(line)
 }
@@ -199,7 +150,9 @@ function extractPhones(text) {
   return uniq(out)
 }
 
-// Address helpers
+// ====== Addresses (regex + JSON-LD) ======
+
+// Clean up CMS-induced splits like "475\nWashington Street"
 function normalizeAddressBreaks(text) {
   return text
     .replace(/(\d{1,6})\s*\n\s*([A-Za-z])/g, '$1 $2')
@@ -207,15 +160,16 @@ function normalizeAddressBreaks(text) {
     .replace(/,\s*\n\s*/g, ', ')
     .replace(/\|\s*/g, ' ')
 }
+
 const STREET_TYPES = [
   'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr',
-  'Lane','Ln','Court','Ct','Place','Pl','Parkway','Pkwy','Highway','Hwy','Way',
-  'Terrace','Terr','Circle','Cir','Pike'
+  'Lane','Ln','Court','Ct','Place','Pl','Parkway','Pkwy','Highway','Hwy',
+  'Way','Terrace','Terr','Circle','Cir','Pike'
 ]
 const STREET_TYPES_RE = new RegExp(`\\b(?:${STREET_TYPES.join('|')})\\b`, 'i')
 const NAV_WORDS_RE = /\b(Home|About|Services|Contact|Reviews|Specials|Privacy|Terms|COVID|Update|Name:|Email:|Phone:|Menu)\b/i
 
-function extractAddresses(rawText) {
+function extractAddressesFromText(rawText) {
   const text = normalizeAddressBreaks(rawText)
   const re = new RegExp(
     String.raw`(^|\n)\s*` +
@@ -233,17 +187,60 @@ function extractAddresses(rawText) {
     const city = (m[3] || '').replace(/\s{2,}/g, ' ').trim()
     const state = (m[4] || '').trim()
     const zip = (m[5] || '').trim()
-    if (!street || !STREET_TYPES_RE.test(street)) continue
-    if (NAV_WORDS_RE.test(street)) continue
-    const letters = (street.match(/[A-Za-z]/g) || []).length
-    if (letters < 3) continue
+    if (!street || !STREET_TYPES_RE.test(street) || NAV_WORDS_RE.test(street)) continue
+    if ((street.match(/[A-Za-z]/g) || []).length < 3) continue
     street = street.replace(/\s+(Suite|Ste|Unit|#)\s*/i, ', $1 ')
     out.push(`${street}\n${city}, ${state} ${zip}\nUSA`)
   }
-  return uniq(out)
+  return out
 }
 
-// Social URLs
+function safeStr(v) { return (v ?? '').toString().trim() }
+function extractAddressesFromJsonLd(jsonldPages) {
+  const out = []
+  for (const { jsonld } of jsonldPages) {
+    const stack = Array.isArray(jsonld) ? jsonld : [jsonld]
+    const flat = []
+    const pushAll = (node) => {
+      if (!node || typeof node !== 'object') return
+      flat.push(node)
+      for (const k of Object.keys(node)) {
+        const v = node[k]
+        if (Array.isArray(v)) v.forEach(pushAll)
+        else if (v && typeof v === 'object') pushAll(v)
+      }
+    }
+    stack.forEach(pushAll)
+
+    for (const node of flat) {
+      const type = (Array.isArray(node['@type']) ? node['@type'].join(',') : node['@type']) || ''
+      if (!/LocalBusiness|Organization|Store|Restaurant|HomeAndConstructionBusiness/i.test(type)) continue
+      const addr = node.address
+      const addrs = Array.isArray(addr) ? addr : [addr]
+      for (const a of addrs) {
+        if (!a || typeof a !== 'object') continue
+        const line1Parts = [safeStr(a.streetAddress)]
+        if (!line1Parts[0]) continue
+        const city = safeStr(a.addressLocality)
+        const state = safeStr(a.addressRegion)
+        const zip = safeStr(a.postalCode)
+        const country = (safeStr(a.addressCountry) || 'USA').replace(/^US$/i, 'USA')
+        if (city && state && zip) {
+          out.push(`${line1Parts[0]}\n${city}, ${state} ${zip}\n${country}`)
+        }
+      }
+    }
+  }
+  return out
+}
+
+function extractAddresses(corpus, jsonldPages) {
+  const fromText = extractAddressesFromText(corpus)
+  const fromLd = extractAddressesFromJsonLd(jsonldPages)
+  return uniq([...fromText, ...fromLd])
+}
+
+// ====== Social media (canonical + dedup) ======
 function canonicalSocialUrl(href) {
   try {
     const u = new URL(href, 'https://example.com')
@@ -251,8 +248,11 @@ function canonicalSocialUrl(href) {
     let path = (u.pathname || '/').replace(/\/+$/, '')
     if (!path) path = '/'
     return `https://${host}${path}${u.search || ''}`
-  } catch { return null }
+  } catch {
+    return null
+  }
 }
+
 function extractSocialFromPages(pages) {
   const platforms = [
     { key: 'Facebook', hosts: ['facebook.com'], disallow: ['/sharer'] },
@@ -298,7 +298,7 @@ function extractSocialFromPages(pages) {
   return lines.length ? lines : []
 }
 
-// BBB seal
+// ====== BBB Seal ======
 function detectBBBSeal(pages) {
   let found = false
   for (const { html } of pages) {
@@ -316,9 +316,10 @@ function detectBBBSeal(pages) {
   return found
 }
 
-// Hours formatting (unchanged)
+// ====== Hours normalization ======
 const FULL_DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 const DAY_ABBR = { Mon:'Monday', Tue:'Tuesday', Wed:'Wednesday', Thu:'Thursday', Thur:'Thursday', Fri:'Friday', Sat:'Saturday', Sun:'Sunday' }
+
 function toAmPm(h, m) {
   h = parseInt(h, 10); m = m == null ? 0 : parseInt(m, 10)
   const ampm = h >= 12 ? 'PM' : 'AM'
@@ -377,30 +378,81 @@ function normalizeHoursFromCorpus(corpus) {
   if (lines.every(Boolean)) return lines.join('\n')
   return 'None'
 }
-function fixHoursFormatting(modelHours, corpus) {
-  if (!modelHours || modelHours === 'None') return normalizeHoursFromCorpus(corpus)
-  let s = String(modelHours).replace(/\r/g, '').trim()
-  s = s.replace(/\s*(Monday:)/g, '\n$1')
-       .replace(/\s*(Tuesday:)/g, '\n$1')
-       .replace(/\s*(Wednesday:)/g, '\n$1')
-       .replace(/\s*(Thursday:)/g, '\n$1')
-       .replace(/\s*(Friday:)/g, '\n$1')
-       .replace(/\s*(Saturday:)/g, '\n$1')
-       .replace(/\s*(Sunday:)/g, '\n$1')
-       .trim()
-  const lines = s.split(/\n+/).map(x => x.trim()).filter(Boolean)
-  const re = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday):\s*(?:Closed|(\d{2}:\d{2}\s(?:AM|PM))\s-\s(\d{2}:\d{2}\s(?:AM|PM)))$/
-  const ok = FULL_DAYS.every(day => lines.some(l => re.test(l) && l.startsWith(day + ':')))
-  if (!ok) return normalizeHoursFromCorpus(corpus)
-  return lines.join('\n')
+function formatHoursFromJsonLd(jsonldPages) {
+  // look for openingHoursSpecification arrays
+  for (const { jsonld } of jsonldPages) {
+    const stack = Array.isArray(jsonld) ? jsonld : [jsonld]
+    const specs = []
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return
+      if (node.openingHoursSpecification) {
+        const list = Array.isArray(node.openingHoursSpecification)
+          ? node.openingHoursSpecification
+          : [node.openingHoursSpecification]
+        specs.push(...list)
+      }
+      Object.values(node).forEach(v => {
+        if (Array.isArray(v)) v.forEach(walk)
+        else if (v && typeof v === 'object') walk(v)
+      })
+    }
+    stack.forEach(walk)
+    if (!specs.length) continue
+
+    const map = {}
+    for (const s of specs) {
+      const days = s.dayOfWeek
+      const opens = s.opens
+      const closes = s.closes
+      if (!days || !opens || !closes) continue
+      const daysArr = Array.isArray(days) ? days : [days]
+      for (let d of daysArr) {
+        d = (d || '').toString()
+        const day = /Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday/.test(d)
+          ? d
+          : (d.match(/Mon|Tue|Wed|Thu|Fri|Sat|Sun/i)?.[0] || '')
+        const full = DAY_ABBR[day] || day
+        if (!FULL_DAYS.includes(full)) continue
+        const [oh, om='0'] = (opens || '09:00').split(':')
+        const [ch, cm='0'] = (closes || '17:00').split(':')
+        map[full] = `${full}: ${toAmPm(oh, om)} - ${toAmPm(ch, cm)}`
+      }
+    }
+    // fill missing as Closed if any exist? Requirement says all seven or None.
+    if (FULL_DAYS.every(d => map[d])) {
+      return FULL_DAYS.map(d => map[d]).join('\n')
+    }
+  }
+  return null
+}
+function fixHoursFormatting(modelHours, corpus, jsonldPages) {
+  if (modelHours && modelHours !== 'None') {
+    let s = String(modelHours).replace(/\r/g, '').trim()
+    s = s.replace(/\s*(Monday:)/g, '\n$1')
+         .replace(/\s*(Tuesday:)/g, '\n$1')
+         .replace(/\s*(Wednesday:)/g, '\n$1')
+         .replace(/\s*(Thursday:)/g, '\n$1')
+         .replace(/\s*(Friday:)/g, '\n$1')
+         .replace(/\s*(Saturday:)/g, '\n$1')
+         .replace(/\s*(Sunday:)/g, '\n$1')
+         .trim()
+    const lines = s.split(/\n+/).map(x => x.trim()).filter(Boolean)
+    const re = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday):\s*(?:Closed|(\d{2}:\d{2}\s(?:AM|PM))\s-\s(\d{2}:\d{2}\s(?:AM|PM)))$/
+    const ok = FULL_DAYS.every(day => lines.some(l => re.test(l) && l.startsWith(day + ':')))
+    if (ok) return lines.join('\n')
+  }
+  // try JSON-LD
+  const ld = formatHoursFromJsonLd(jsonldPages)
+  if (ld) return ld
+  // try text
+  return normalizeHoursFromCorpus(corpus)
 }
 
-// Lead form detection (includes reservation keywords)
+// ====== Lead Form detection ======
 function detectLeadForm(pages, originUrl) {
   const start = new URL(originUrl)
   const domByUrl = new Map(pages.map(p => [p.url, cheerio.load(p.html)]))
   const INTENT = /(quote|estimate|consult|consultation|request|schedule|book|appointment|service|contact|reservation|reserve|table)/i
-
   const candidates = []
   for (const { url, html } of pages) {
     const $ = cheerio.load(html)
@@ -420,8 +472,7 @@ function detectLeadForm(pages, originUrl) {
       } catch {}
     })
   }
-
-  const FIELD_RE = /(name|email|phone|message|address|date|time|guests|party)/i
+  const FIELD_RE = /(name|email|phone|message|address|reservation)/i
   function pageHasRealForm(u) {
     const $ = domByUrl.get(u)
     if (!$) return false
@@ -455,7 +506,7 @@ function detectLeadForm(pages, originUrl) {
   return null
 }
 
-// OpenAI
+// ====== Model Call ======
 async function callOpenAI(systemPrompt, userPrompt) {
   if (!OPENAI_API_KEY) {
     const err = new Error('Missing OPENAI_API_KEY')
@@ -488,6 +539,7 @@ async function callOpenAI(systemPrompt, userPrompt) {
   return data.choices?.[0]?.message?.content || ''
 }
 
+// ====== Enforcers & cleaners ======
 const ALLOWED_CLIENT_BASE = new Set([
   'residential',
   'commercial',
@@ -517,6 +569,7 @@ function sanitizeDescription(text) {
   return t.trim()
 }
 
+// ====== Handler ======
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end()
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
@@ -536,56 +589,30 @@ export default async function handler(req, res) {
       return res.status(400).send('Please enter a valid URL.')
     }
 
-    // Crawl
-    const { corpus, pages } = await crawl(parsed.href)
-    // Also parse JSON-LD
-    const ld = extractFromJsonLd(pages)
-
-    // Thin-content gate: allow if we found *something* in JSON-LD
-    if ((!corpus || corpus.length < 40) && ld.addresses.length === 0 && ld.phones.length === 0) {
+    // Crawl site (deeper + JSON-LD)
+    const { corpus, pages, jsonldPages } = await crawl(parsed.href)
+    if (!corpus && !jsonldPages.length) {
       return res.status(422).send('Could not extract enough content from the provided site.')
     }
 
-    // Deterministic fields (merge JSON-LD + regex/page scanning)
-    const emails = extractEmails(corpus)
-    const phones = uniq([...extractPhones(corpus), ...extractPhones(ld.phones.join(' '))])
-    const addrFromText = extractAddresses(corpus)
-    const addresses = uniq([...addrFromText, ...ld.addresses])
-
-    const socialFound = uniq([
-      ...extractSocialFromPages(pages),
-      ...ld.socials
-        .map(canonicalSocialUrl)
-        .filter(Boolean)
-        .map(u => {
-          const host = new URL(u).hostname
-          if (host.endsWith('facebook.com')) return `Facebook: ${u}`
-          if (host.endsWith('instagram.com')) return `Instagram: ${u}`
-          if (host.endsWith('linkedin.com')) return `LinkedIn: ${u}`
-          if (host.endsWith('twitter.com') || host.endsWith('x.com')) return `X: ${u}`
-          if (host.endsWith('youtube.com')) return `YouTube: ${u}`
-          if (host.endsWith('vimeo.com')) return `Vimeo: ${u}`
-          if (host.endsWith('flickr.com')) return `Flickr: ${u}`
-          if (host.endsWith('foursquare.com')) return `Foursquare: ${u}`
-          if (host.endsWith('threads.net') || host.endsWith('threads.com')) return `Threads: ${u}`
-          if (host.endsWith('tumblr.com')) return `Tumblr: ${u}`
-          return null
-        })
-        .filter(Boolean)
-    ])
-
+    // Deterministic fields
+    const emails = extractEmails(corpus || '')
+    // include JSON-LD telephone too (format later with regex)
+    const phonesFromText = extractPhones(corpus || '')
+    const addresses = extractAddresses(corpus || '', jsonldPages)
+    const socialFound = extractSocialFromPages(pages)
     const bbbFound = detectBBBSeal(pages)
-    const lead = detectLeadForm(pages, parsed.href)
+    const leadFormFound = detectLeadForm(pages, parsed.href)
 
     const emailAddresses = emails.length ? emails.join('\n') : 'None'
-    const phoneNumbers = phones.length ? phones.join('\n') : 'None'
+    const phoneNumbers = phonesFromText.length ? phonesFromText.join('\n') : 'None'
     const addressesBlock = addresses.length ? addresses.join('\n\n') : 'None'
     const socialMediaUrls = socialFound.length ? socialFound.join('\n') : 'None'
     const bbbSealPlain = bbbFound
       ? 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
       : 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
 
-    // ===== Model fields =====
+    // ====== Model (judgment fields) ======
     const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
 
 INFORMATION SOURCE:
@@ -659,7 +686,7 @@ Return ONLY JSON.`
     const userPrompt = `Website URL: ${parsed.href}
 
 WEBSITE CONTENT (verbatim):
-${corpus}
+${corpus || '(no visible text)'}
 `
 
     let aiRaw = await callOpenAI(systemPrompt, userPrompt)
@@ -678,7 +705,7 @@ ${corpus}
 
     const clientBase = enforceClientBase(String(payload.clientBase || 'residential'))
 
-    // Description (template + clientBase)
+    // Description: rewrite to exact template and append client base sentence
     let desc0 = sanitizeDescription(String(payload.description || ''))
     const descRewrite = await callOpenAI(
       'Return ONLY the following text, <=900 chars, neutral tone, no promotional words, no links:\nTemplate: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."',
@@ -704,10 +731,10 @@ ${corpus}
       productsAndServices = uniq(items).join(', ')
     }
 
-    // Hours
-    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus)
+    // Hours (prefer JSON-LD, then model fix, then text)
+    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus || '', jsonldPages)
 
-    // Licenses (labels + spacing)
+    // Licenses (ensure labels; blank line between blocks)
     let licenseNumbers = String(payload.licenseNumbers || 'None') || 'None'
     if (licenseNumbers !== 'None') {
       const blocks = licenseNumbers.split(/\n{2,}/).map(b => b.trim()).filter(Boolean).map(b => {
@@ -720,7 +747,6 @@ ${corpus}
       licenseNumbers = uniq(blocks).join('\n\n')
     }
 
-    // Simple strings
     let ownerDemographic = String(payload.ownerDemographic || 'None') || 'None'
     let methodsOfPayment = String(payload.methodsOfPayment || 'None') || 'None'
     let serviceArea = String(payload.serviceArea || 'None') || 'None'
@@ -732,17 +758,18 @@ ${corpus}
     const secs = Math.floor((elapsed % 60000) / 1000)
     const timeTaken = `${mins} minute${mins === 1 ? '' : 's'} ${secs} second${secs === 1 ? '' : 's'}`
 
-    // Lead form
+    // Lead form (formatted)
+    const lead = detectLeadForm(pages, parsed.href)
     let leadForm = 'None'
     let leadFormTitle = ''
     let leadFormUrl = ''
-    const lead = detectLeadForm(pages, parsed.href)
     if (lead) {
       leadFormTitle = lead.title || ''
       leadFormUrl = lead.url || ''
       leadForm = `Lead Form Title: ${leadFormTitle || 'None'}\nLead Form URL: ${leadFormUrl || 'None'}`
     }
 
+    // Final response
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
       url: parsed.href,
@@ -754,9 +781,9 @@ ${corpus}
       productsAndServices,
 
       hoursOfOperation,
-      addresses: ensureHeaderBlocks(addressesBlock(addresses)),
-      phoneNumbers: ensureHeaderBlocks(phonesBlock(phones)),
-      emailAddresses: ensureHeaderBlocks(emailAddressesBlock(emails)),
+      addresses: ensureHeaderBlocks(addressesBlock),
+      phoneNumbers: ensureHeaderBlocks(phoneNumbers),
+      emailAddresses: ensureHeaderBlocks(emailAddresses),
       socialMediaUrls: ensureHeaderBlocks(socialMediaUrls),
 
       licenseNumbers: ensureHeaderBlocks(licenseNumbers),
@@ -765,6 +792,7 @@ ${corpus}
       serviceArea,
       refundAndExchangePolicy,
 
+      // Lead form fields for UI
       leadForm,
       leadFormTitle,
       leadFormUrl
@@ -774,15 +802,4 @@ ${corpus}
     const code = err.statusCode || 500
     return res.status(code).send(err.message || 'Internal Server Error')
   }
-}
-
-// helpers to format blocks cleanly
-function addressesBlock(addresses) {
-  return (addresses && addresses.length) ? addresses.join('\n\n') : 'None'
-}
-function phonesBlock(phones) {
-  return (phones && phones.length) ? phones.join('\n') : 'None'
-}
-function emailAddressesBlock(emails) {
-  return (emails && emails.length) ? emails.join('\n') : 'None'
 }
