@@ -49,13 +49,14 @@ function extractVisibleText(html) {
   return $('body').text().replace(/\s+/g, ' ').trim()
 }
 
-/** Crawl home + depth-1 same-origin pages. Returns { text, hrefs } */
+/** Crawl home + depth-1 same-origin pages. Returns { text, hrefs, htmls } */
 async function crawl(rootUrl) {
   const start = new URL(rootUrl)
   const visited = new Set()
   const queue = [start.href]
   const texts = []
   const hrefs = []
+  const htmls = []
 
   while (queue.length) {
     const current = queue.shift()
@@ -64,6 +65,7 @@ async function crawl(rootUrl) {
 
     try {
       const html = await fetchHtml(current)
+      htmls.push(html)
       const $ = cheerio.load(html)
 
       $('script, style, noscript, svg, iframe').remove()
@@ -83,7 +85,7 @@ async function crawl(rootUrl) {
       })
     } catch {}
   }
-  return { text: texts.join('\n\n'), hrefs }
+  return { text: texts.join('\n\n'), hrefs, htmls }
 }
 
 async function callOpenAI(systemPrompt, userPrompt) {
@@ -133,7 +135,7 @@ function stripExcluded(text) {
   return t
 }
 
-/* ---------------- Owner Demographic (exact match only) ---------------- */
+/* Owner Demographic (exact match only) */
 const OWNER_CATEGORIES = [
   'Asian American Owned',
   'Black/African American Owned',
@@ -163,14 +165,14 @@ function detectOwnerDemographic(text = '') {
   return 'None'
 }
 
-/* ---------------- Products & Services ---------------- */
+/* Products & Services */
 function cleanProductsAndServices(value) {
   if (!value) return 'None'
   const v = String(value).trim()
   return v || 'None'
 }
 
-/* ---------------- Hours of Operation: validation ---------------- */
+/* Hours of Operation: validation */
 const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 const TIME_RE = '(0?[1-9]|1[0-2]):[0-5][0-9] (AM|PM)'
 const LINE_RE = new RegExp(`^(${DAYS.join('|')}): ((${TIME_RE} - ${TIME_RE})|Closed)$`)
@@ -189,7 +191,7 @@ function normalizeHours(raw) {
   return lines.join('\n')
 }
 
-/* ---------------- Address extraction (cleaned & stricter) ---------------- */
+/* Address extraction (cleaned & stricter) ... unchanged from previous post ... */
 const STREET_TYPES = [
   'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr','Lane','Ln','Court','Ct','Circle','Cir',
   'Way','Parkway','Pkwy','Place','Pl','Terrace','Ter','Highway','Hwy','Route','Rte','Trail','Trl','Center','Ctr'
@@ -224,7 +226,7 @@ function preCleanText(corpus) {
     [/T\s*r\s*a\s*i\s*l/gi, 'Trail'],
     [/H\s*i\s*g\s*h\s*w\s*a\s*y/gi, 'Highway'],
     [/R\s*o\s*u\s*t\s*e/gi, 'Route'],
-    [/C\s*e\s*n\s*t\s*e\s*r/gi, 'Center'],
+    [/C\s*e\s*n\s*t\s*e*r/gi, 'Center'],
     [/S\s*u\s*i\s*t\s*e/gi, 'Suite'],
     [/U\s*n\s*i\s*t/gi, 'Unit'],
     [/A\s*p\s*t/gi, 'Apt'],
@@ -285,7 +287,7 @@ function extractAddresses(corpus) {
   return out.length ? out.join('\n\n') : 'None'
 }
 
-/* ---------------- Phone extraction (US only, format + ext) ---------------- */
+/* Phone extraction (US only, format + ext) */
 const PHONE_CANDIDATE =
   /(?<!\+)(?:\(\s*\d{3}\s*\)\s*\d{3}[\s\.-]?\d{4}|\d{3}[\s\.-]?\d{3}[\s\.-]?\d{4}|\b\d{10}\b)/g
 const EXT_PATTERN = /(ext\.?|x|extension)\s*[:#\-]?\s*(\d{1,6})/i
@@ -319,7 +321,7 @@ function extractPhones(corpus) {
   return results.length ? results.join('\n') : 'None'
 }
 
-/* ---------------- Social media URL extraction (root-only excluded) -------- */
+/* Social media URL extraction (root-only excluded) -------- */
 const SOCIAL_SITES = [
   { key: 'Facebook', hosts: ['facebook.com','fb.com'], exclude: ['sharer.php','share','dialog/feed'] },
   { key: 'Instagram', hosts: ['instagram.com'], exclude: [] },
@@ -361,7 +363,7 @@ function extractSocialMediaUrls(allHrefs=[]) {
     .join('\n')
 }
 
-/* ---------------- License info extraction (strict format) ---------------- */
+/* License info extraction (strict format) */
 function formatLicenses(raw) {
   if (!raw) return 'None'
   if (typeof raw === 'string') {
@@ -373,6 +375,26 @@ function formatLicenses(raw) {
     return lines.length ? lines.join('\n') : 'None'
   }
   return 'None'
+}
+
+/* -------------- BBB Seal Detection (NEW) -------------- */
+function detectBBBSeal(htmls=[]) {
+  let found = false
+  for (const html of htmls) {
+    if (!html) continue
+    // Look for image src or filenames containing "bbb" or "accredited"
+    if (/src\s*=\s*["'][^"']*(bbb|accredited)[^"']*["']/i.test(html)) {
+      found = true; break
+    }
+    // Look for phrase "BBB Accredited" anywhere
+    if (/bbb\s+accredited/i.test(html)) {
+      found = true; break
+    }
+  }
+  if (found) {
+    return 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
+  }
+  return 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
 }
 
 /* ==================== MAIN HANDLER ==================== */
@@ -394,7 +416,7 @@ export default async function handler(req, res) {
     }
 
     // Crawl home + depth 1 pages only on same origin
-    const { text: corpus, hrefs: allHrefs } = await crawl(parsed.href)
+    const { text: corpus, hrefs: allHrefs, htmls } = await crawl(parsed.href)
     if (!corpus || corpus.length < 40) {
       return res.status(422).send('Could not extract enough content from the provided site.')
     }
@@ -492,6 +514,7 @@ IMPORTANT: Ensure all outputs are factual, neutral, and comply with the data poi
     let phoneNumbers = extractPhones(corpus)
     let socialMediaUrls = extractSocialMediaUrls(allHrefs)
     let licenseNumbers = formatLicenses(payload.licenseNumbers)
+    let bbbSeal = detectBBBSeal(htmls)
 
     description = stripExcluded(description)
     if (badWordPresent(description)) {
@@ -521,7 +544,8 @@ IMPORTANT: Ensure all outputs are factual, neutral, and comply with the data poi
       addresses,
       phoneNumbers,
       socialMediaUrls,
-      licenseNumbers
+      licenseNumbers,
+      bbbSeal
     }))
   } catch (err) {
     const code = err.statusCode || 500
