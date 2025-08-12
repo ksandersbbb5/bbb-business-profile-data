@@ -83,6 +83,7 @@ export default function App() {
       {/* Errors */}
       {error && <div style={{ color: 'red', marginTop: 16 }}>{error}</div>}
 
+      {/* Loading */}
       {loading && <div style={{ marginTop: 16 }}>Processing…</div>}
 
       {/* Results */}
@@ -136,10 +137,18 @@ export default function App() {
             </pre>
           </div>
 
-          <div>
+          <div style={{ marginBottom: 16 }}>
             <strong>Social Media URLs:</strong><br />
             <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
               {result.socialMediaUrls}
+            </pre>
+          </div>
+
+          {/* License Number(s) */}
+          <div>
+            <strong>License Number(s):</strong><br />
+            <pre style={{ marginTop: 8, whiteSpace: 'pre-wrap', fontFamily: 'inherit' }}>
+              {result.licenseNumbers}
             </pre>
           </div>
         </div>
