@@ -6,24 +6,13 @@ export default function App() {
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [startTime, setStartTime] = useState(null)
   const inputRef = useRef(null)
-
-  // Helper for timing
-  const computeTimeTaken = (start) => {
-    if (!start) return null
-    const diff = Math.floor((Date.now() - start) / 1000)
-    const min = Math.floor(diff / 60)
-    const sec = diff % 60
-    return `${min} minute${min !== 1 ? 's' : ''} ${sec} second${sec !== 1 ? 's' : ''}`
-  }
 
   const handleSubmit = async (submittedUrl) => {
     const useUrl = (submittedUrl || url || '').trim()
     setError('')
     setResult(null)
     setLoading(true)
-    setStartTime(Date.now())
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
@@ -40,8 +29,6 @@ export default function App() {
         }
       }
       const data = await res.json()
-      // Add timing
-      data.timeTaken = computeTimeTaken(startTime)
       setResult(data)
     } catch (e) {
       setError(e.message || 'Something went wrong. Please try again later.')
@@ -54,8 +41,32 @@ export default function App() {
     setUrl('')
     setResult(null)
     setError('')
-    setStartTime(null)
     if (inputRef.current) inputRef.current.focus()
+  }
+
+  const Block = ({ label, value, pre = false, style }) => {
+    if (value === undefined || value === null || value === '') return null
+    return (
+      <div style={{ marginBottom: 22 }}>
+        <strong style={{ fontSize: 17, display: 'block', fontFamily: 'Arial' }}>{label}</strong>
+        {pre ? (
+          <pre style={{
+            fontFamily: 'Arial, monospace',
+            fontSize: 15,
+            margin: 0,
+            whiteSpace: 'pre-line',
+            ...(style || {})
+          }}>{value}</pre>
+        ) : (
+          <div style={{ fontFamily: 'Arial', fontSize: 15, marginTop: 2, ...(style || {}) }}>{value}</div>
+        )}
+      </div>
+    )
+  }
+
+  const SealBlock = ({ label, value }) => {
+    const isNotFound = typeof value === 'string' && value.toLowerCase().startsWith('not found')
+    return <Block label={label} value={value} pre={false} style={isNotFound ? { color: 'red' } : {}} />
   }
 
   return (
@@ -70,8 +81,7 @@ export default function App() {
         <div>
           <h1 style={{ fontSize: 28, margin: 0, fontFamily: 'Arial' }}>Obtain Information from Businesses Website for their BBB B</h1>
           <p style={{ color: '#444', margin: 0, fontFamily: 'Arial' }}>
-            This will generate the text of the BBB Business Profile Description Overview, also known as About This Business.  
-            It will also generate data for Owner Demographic, Social Media URLs, Hours of Operation, Phone Number(s), Address, License Information, Refund and Exchange Policy, and more, from the information on their website.
+            This tool generates the BBB Business Profile Description Overview and additional data points from the business website.
           </p>
         </div>
       </div>
@@ -85,7 +95,7 @@ export default function App() {
         inputRef={inputRef}
       />
 
-      {/* Actions row */}
+      {/* Actions */}
       <div style={{ marginTop: 12 }}>
         <button
           type="button"
@@ -104,7 +114,7 @@ export default function App() {
         </button>
       </div>
 
-      {/* Errors */}
+      {/* Error */}
       {error && (
         <div style={{ color: 'red', marginTop: 16, fontFamily: 'Arial' }}>{error}</div>
       )}
@@ -124,51 +134,31 @@ export default function App() {
             fontFamily: 'Arial'
           }}
         >
-          {/* Time Taken */}
-          {result.timeTaken && (
-            <div style={{ marginBottom: 20, fontSize: 16, color: '#444' }}>
-              <strong>Time to Generate:</strong>
-              <div style={{ marginTop: 2 }}>{result.timeTaken}</div>
-            </div>
-          )}
+          <Block label="Time to Generate:" value={result.timeTaken} />
 
-          {[
-            { label: "Website URL:", key: "url" },
-            { label: "Business Description:", key: "description" },
-            { label: "Client Base:", key: "clientBase" },
-            { label: "Owner Demographic:", key: "ownerDemographic" },
-            { label: "Products and Services:", key: "productsAndServices" },
-            { label: "Hours of Operation:", key: "hoursOfOperation", pre: true },
-            { label: "Address(es):", key: "addresses", pre: true },
-            { label: "Phone Number(s):", key: "phoneNumbers", pre: true },
-            { label: "Social Media URLs:", key: "socialMediaUrls", pre: true },
-            { label: "License Number(s):", key: "licenseNumbers", pre: true },
-            { label: "Email Addresses:", key: "emailAddresses", pre: true },
-            { label: "Methods of Payment:", key: "methodsOfPayment" },
-            { label: "BBB Seal on Website:", key: "bbbSeal", style: result.bbbSeal?.toLowerCase().includes('not found')
-              ? { color: 'red' } : {}
-            },
-            { label: "Service Area:", key: "serviceArea" },
-            { label: "Refund and Exchange Policy:", key: "refundAndExchangePolicy" },
-          ].map((item, idx) => {
-            const value = result[item.key]
-            if (typeof value === 'undefined' || value === null || value === '') return null
-            return (
-              <div key={item.key} style={{ marginBottom: 22, ...(item.style || {}) }}>
-                <strong style={{ fontSize: 17, display: 'block', fontFamily: 'Arial' }}>{item.label}</strong>
-                {item.pre ? (
-                  <pre style={{
-                    fontFamily: 'Arial, monospace',
-                    fontSize: 15,
-                    margin: 0,
-                    whiteSpace: 'pre-line'
-                  }}>{value}</pre>
-                ) : (
-                  <div style={{ fontFamily: 'Arial', fontSize: 15, marginTop: 2 }}>{value}</div>
-                )}
-              </div>
-            )
-          })}
+          <Block label="Website URL:" value={result.url} />
+
+          {/* The API already appends "The business provides services to <clientBase> customers." */}
+          <Block label="Business Description:" value={result.description} />
+
+          <Block label="Client Base:" value={result.clientBase} />
+          <Block label="Owner Demographic:" value={result.ownerDemographic} />
+          <Block label="Products and Services:" value={result.productsAndServices} />
+
+          <Block label="Hours of Operation:" value={result.hoursOfOperation} pre />
+
+          <Block label="Address(es):" value={result.addresses} pre />
+          <Block label="Phone Number(s):" value={result.phoneNumbers} pre />
+          <Block label="Email Addresses:" value={result.emailAddresses} pre />
+          <Block label="Social Media URLs:" value={result.socialMediaUrls} pre />
+
+          <Block label="License Number(s):" value={result.licenseNumbers} pre />
+          <Block label="Methods of Payment:" value={result.methodsOfPayment} />
+
+          <SealBlock label="BBB Seal on Website:" value={result.bbbSeal} />
+
+          <Block label="Service Area:" value={result.serviceArea} />
+          <Block label="Refund and Exchange Policy:" value={result.refundAndExchangePolicy} />
         </div>
       )}
     </div>
