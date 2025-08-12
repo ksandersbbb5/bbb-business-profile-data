@@ -124,10 +124,13 @@ export default function App() {
           style={{ height: 40, width: 40, objectFit: 'contain' }}
         />
         <div>
-          <h1 style={{ fontSize: 28, margin: 0, fontFamily: 'Arial' }}>Obtain Information from Businesses Website for their BBB B</h1>
-          <p style={{ color: '#444', margin: 0, fontFamily: 'Arial' }}>
-            This tool generates the BBB Business Profile Description Overview and additional data points from the business website.
-          </p>
+          <h1 style={{ fontSize: 28, margin: 0, fontFamily: 'Arial' }}>
+  Obtain Information from a Business’s Website for their BBB Business Profile
+</h1>
+<p style={{ color: '#444', margin: 0, fontFamily: 'Arial' }}>
+  This tool generates the BBB Business Profile Description Overview and additional data points from the business’s website.
+</p>
+
         </div>
       </div>
 
