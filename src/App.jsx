@@ -51,7 +51,7 @@ export default function App() {
         <strong style={{ fontSize: 17, display: 'block', fontFamily: 'Arial' }}>{label}</strong>
         {pre ? (
           <pre style={{
-            fontFamily: 'Arial, monospace',
+            fontFamily: 'Arial',
             fontSize: 15,
             margin: 0,
             whiteSpace: 'pre-line',
@@ -69,6 +69,23 @@ export default function App() {
     return <Block label={label} value={value} pre={false} style={isNotFound ? { color: 'red' } : {}} />
   }
 
+  // Compose the Lead Form display from whichever fields the API returns
+  const renderLeadFormValue = (r) => {
+    if (!r) return null
+    if (r.leadForm && typeof r.leadForm === 'string' && r.leadForm.trim()) {
+      return r.leadForm.trim()
+    }
+    const lines = []
+    if (r.leadFormTitle && String(r.leadFormTitle).trim()) {
+      lines.push(`Lead Form Title: ${String(r.leadFormTitle).trim()}`)
+    }
+    if (r.leadFormUrl && String(r.leadFormUrl).trim()) {
+      lines.push(`Lead Form URL: ${String(r.leadFormUrl).trim()}`)
+    }
+    if (!lines.length) return 'None'
+    return lines.join('\n')
+  }
+
   return (
     <div style={{ maxWidth: 860, margin: '40px auto', padding: '0 16px', fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto' }}>
       {/* Header with BBB logo */}
@@ -79,7 +96,9 @@ export default function App() {
           style={{ height: 40, width: 40, objectFit: 'contain' }}
         />
         <div>
-          <h1 style={{ fontSize: 28, margin: 0, fontFamily: 'Arial' }}>Obtain Information from Businesses Website for their BBB B</h1>
+          <h1 style={{ fontSize: 28, margin: 0, fontFamily: 'Arial' }}>
+            Obtain Information from Businesses Website for their BBB Business Profile
+          </h1>
           <p style={{ color: '#444', margin: 0, fontFamily: 'Arial' }}>
             This tool generates the BBB Business Profile Description Overview and additional data points from the business website.
           </p>
@@ -135,7 +154,6 @@ export default function App() {
           }}
         >
           <Block label="Time to Generate:" value={result.timeTaken} />
-
           <Block label="Website URL:" value={result.url} />
 
           {/* The API already appends "The business provides services to <clientBase> customers." */}
@@ -146,7 +164,6 @@ export default function App() {
           <Block label="Products and Services:" value={result.productsAndServices} />
 
           <Block label="Hours of Operation:" value={result.hoursOfOperation} pre />
-
           <Block label="Address(es):" value={result.addresses} pre />
           <Block label="Phone Number(s):" value={result.phoneNumbers} pre />
           <Block label="Email Addresses:" value={result.emailAddresses} pre />
@@ -159,6 +176,9 @@ export default function App() {
 
           <Block label="Service Area:" value={result.serviceArea} />
           <Block label="Refund and Exchange Policy:" value={result.refundAndExchangePolicy} />
+
+          {/* NEW: Lead Form - Custom RAQ */}
+          <Block label="Lead Form - Custom RAQ:" value={renderLeadFormValue(result)} pre />
         </div>
       )}
     </div>
