@@ -68,42 +68,100 @@ async function crawl(rootUrl) {
   return { corpus: texts.join('\n\n'), pages: htmls }
 }
 
-// ====== Deterministic extractors ======
+// ====== Utilities ======
 function uniq(arr) { return [...new Set((arr || []).filter(Boolean))] }
+function ensureHeaderBlocks(str) {
+  return String(str || '')
+    .replace(/\r/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
 
+// ====== Email ======
 function extractEmails(text) {
   return uniq(text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [])
 }
 
+// ====== Phones (strict NANP) ======
+function isValidNanp(area, exch, line) {
+  // NANP rules: area & exchange cannot start with 0 or 1
+  return /^[2-9]\d{2}$/.test(area) && /^[2-9]\d{2}$/.test(exch) && /^\d{4}$/.test(line)
+}
 function extractPhones(text) {
   const out = []
-  const re = /(?:\+?1[\s.-]?)?(?:\(?(\d{3})\)?[\s.-]?(\d{3})[\s.-]?(\d{4}))(?:\s*(?:ext\.?|x|extension)\s*(\d+))?/gi
+  // Boundaries to avoid matching inside long digit strings/IDs
+  const re = /(?<!\d)(?:\+?1[\s.\-]?)?(?:\(?(\d{3})\)?[\s.\-]?(\d{3})[\s.\-]?(\d{4}))(?:\s*(?:ext\.?|x|extension)\s*(\d+))?(?!\d)/gi
   let m
   while ((m = re.exec(text))) {
-    let s = `(${m[1]}) ${m[2]}-${m[3]}`
-    if (m[4]) s += ` ext. ${m[4]}`
+    const [_, a, b, c, ext] = m
+    if (!isValidNanp(a, b, c)) continue
+    let s = `(${a}) ${b}-${c}`
+    if (ext) s += ` ext. ${ext}`
     out.push(s)
   }
   return uniq(out)
 }
 
-function extractAddresses(text) {
-  // 123 Main St, Suite 400, Boston, MA 02108   (comma after city optional)
-  const re = /(\d{1,6}[^\n,]*?(?:\b(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Pl|Place|Pkwy|Parkway|Hwy|Highway|Way|Terr|Terrace|Cir|Circle|Unit|Suite|Ste|#)\b[^\n,]*)?)\s*,?\s*([A-Za-z][A-Za-z\s\.'-]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)/g
+// ====== Addresses ======
+// Fix cases like "475\nWashington Street" caused by CMS line breaks
+function normalizeAddressBreaks(text) {
+  // If a line ends with a pure number and the next line starts with a word, join them
+  return text.replace(/(\d{1,6})\s*\n\s*([A-Za-z])/g, '$1 $2')
+             .replace(/(\bSuite|#|Unit)\s*\n\s*/gi, '$1 ')
+             .replace(/,\s*\n\s*/g, ', ')
+}
+
+// Require a street type to reduce false positives
+const STREET_TYPES = [
+  'St','Street','Ave','Avenue','Rd','Road','Blvd','Boulevard','Dr','Drive',
+  'Ln','Lane','Ct','Court','Pl','Place','Pkwy','Parkway','Hwy','Highway',
+  'Way','Terr','Terrace','Cir','Circle','Pike'
+]
+const STREET_TYPES_RE = new RegExp(`\\b(?:${STREET_TYPES.join('|')})\\b`, 'i')
+
+function extractAddresses(rawText) {
+  const text = normalizeAddressBreaks(rawText)
+  // Allow optional commas and flexible whitespace/newlines
+  const re = /(\d{1,6}[^\n,]*?(?:\b(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Pl|Place|Pkwy|Parkway|Hwy|Highway|Way|Terr|Terrace|Cir|Circle|Pike)\b[^\n,]*)?)\s*,?\s*([A-Za-z][A-Za-z\s\.'-]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)/g
   const out = []
   let m
   while ((m = re.exec(text))) {
-    const line1 = m[1].replace(/\s{2,}/g, ' ').trim()
+    let line1 = m[1].replace(/\s{2,}/g, ' ').trim()
     const city = m[2].replace(/,$/, '').replace(/\s{2,}/g, ' ').trim()
     const state = m[3].trim()
     const zip = m[4].trim()
+
+    // Quality gates
+    if (!STREET_TYPES_RE.test(line1)) continue
+    // Reject if line1 is mostly digits or too short (avoids "2", "28", etc.)
+    const letters = (line1.match(/[A-Za-z]/g) || []).length
+    if (letters < 3) continue
+
+    // Ensure comma before suite/unit if missing
+    line1 = line1.replace(/\s+(Suite|Ste|Unit|#)\s*/i, ', $1 ')
+    // Add comma after street if missing before city was joined
+    // (Handled by formatting below)
+
     out.push(`${line1}\n${city}, ${state} ${zip}\nUSA`)
   }
   return uniq(out)
 }
 
+// ====== Social media (canonical + dedup) ======
+function canonicalSocialUrl(href) {
+  try {
+    const u = new URL(href, 'https://example.com')
+    const host = u.hostname.replace(/^www\./, '').toLowerCase()
+    let path = (u.pathname || '/').replace(/\/+$/, '') // strip trailing slash
+    if (!path) path = '/'
+    return `https://${host}${path}${u.search || ''}`
+  } catch {
+    return null
+  }
+}
+
 function extractSocialFromPages(pages) {
-  const domains = [
+  const platforms = [
     { key: 'Facebook', hosts: ['facebook.com'], disallow: ['/sharer'] },
     { key: 'Instagram', hosts: ['instagram.com'] },
     { key: 'LinkedIn', hosts: ['linkedin.com'] },
@@ -116,28 +174,39 @@ function extractSocialFromPages(pages) {
     { key: 'Threads', hosts: ['threads.net','threads.com'] },
     { key: 'Tumblr', hosts: ['tumblr.com'] }
   ]
-  const found = []
+  const foundPairs = []
   for (const { html } of pages) {
     const $ = cheerio.load(html)
     $('a[href]').each((_, a) => {
-      const href = String($(a).attr('href') || '')
+      const raw = String($(a).attr('href') || '')
+      const canon = canonicalSocialUrl(raw)
+      if (!canon) return
       try {
-        const u = new URL(href, 'https://example.com') // relative safe
-        const host = u.hostname.replace(/^www\./, '')
-        const path = u.pathname || '/'
-        for (const d of domains) {
-          if (d.hosts.some(h => host.endsWith(h))) {
-            if (!path || path === '/' || path.length <= 1) return // require at least one path segment
-            if (d.disallow && d.disallow.some(bad => path.startsWith(bad))) return
-            found.push(`${d.key}: ${href.startsWith('http') ? href : `https://${host}${path}${u.search || ''}`}`)
+        const u = new URL(canon)
+        const host = u.hostname
+        const path = u.pathname
+        if (!path || path === '/') return // require at least one segment
+        for (const p of platforms) {
+          if (p.hosts.some(h => host.endsWith(h))) {
+            if (p.disallow && p.disallow.some(bad => path.startsWith(bad))) return
+            foundPairs.push([p.key, canon])
           }
         }
       } catch {}
     })
   }
-  return uniq(found)
+  // Dedup by canonical URL
+  const seen = new Set()
+  const lines = []
+  for (const [key, url] of foundPairs) {
+    if (seen.has(url)) continue
+    seen.add(url)
+    lines.push(`${key}: ${url}`)
+  }
+  return lines.length ? lines : []
 }
 
+// ====== BBB Seal ======
 function detectBBBSeal(pages) {
   let found = false
   for (const { html } of pages) {
@@ -166,9 +235,7 @@ function toAmPm(h, m) {
   const mm = m.toString().padStart(2, '0')
   return `${hh.toString().padStart(2,'0')}:${mm} ${ampm}`
 }
-
 function parseTimeToken(tok) {
-  // Accept 8, 8am, 8 am, 08:00, 8:00pm, etc.
   const t = tok.trim().toLowerCase()
   const m1 = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i)
   if (!m1) return null
@@ -177,84 +244,51 @@ function parseTimeToken(tok) {
   const ap = m1[3]
   if (ap === 'pm' && h < 12) h += 12
   if (ap === 'am' && h === 12) h = 0
-  if (!ap && h <= 7) {
-    // If no AM/PM and small hour, assume AM for open and PM for close handled by caller
-  }
-  return { h, m, hasAP: !!ap }
+  return { h, m }
 }
-
 function expandRange(token) {
-  // e.g., "Mon-Fri: 8am - 7pm" or "Mon – Fri 8:00 - 19:00"
   const re = /(Mon|Tue|Wed|Thu|Thur|Fri|Sat|Sun)\s*[-–]\s*(Mon|Tue|Wed|Thu|Thur|Fri|Sat|Sun)\s*[:\-]?\s*([0-9: ]+(?:am|pm)?)\s*[-–]\s*([0-9: ]+(?:am|pm)?)/i
   const m = token.match(re)
   if (!m) return null
   const startDay = DAY_ABBR[m[1]]
   const endDay = DAY_ABBR[m[2]]
-  const openTok = m[3]; const closeTok = m[4]
-  const open = parseTimeToken(openTok); const close = parseTimeToken(closeTok)
+  const open = parseTimeToken(m[3]); const close = parseTimeToken(m[4])
   if (!open || !close) return null
-
   const startIdx = FULL_DAYS.indexOf(startDay)
   const endIdx = FULL_DAYS.indexOf(endDay)
-  if (startIdx < 0 || endIdx < 0) return null
-
   const lines = {}
   for (let i = startIdx; i <= endIdx; i++) {
-    const openStr = toAmPm(open.h, open.m)
-    const closeStr = toAmPm(close.h, close.m)
-    lines[FULL_DAYS[i]] = `${FULL_DAYS[i]}: ${openStr} - ${closeStr}`
+    lines[FULL_DAYS[i]] = `${FULL_DAYS[i]}: ${toAmPm(open.h, open.m)} - ${toAmPm(close.h, close.m)}`
   }
   return lines
 }
-
 function normalizeHoursFromCorpus(corpus) {
-  // Try pattern like "Mon-Fri: 8am - 7pm"
   const rangeMatches = corpus.match(/(?:Mon|Tue|Wed|Thu|Thur|Fri|Sat|Sun)\s*[-–]\s*(?:Mon|Tue|Wed|Thu|Thur|Fri|Sat|Sun)[^.\n]*?\d[^.\n]*?(?:am|pm)?\s*[-–]\s*\d[^.\n]*?(?:am|pm)?/ig) || []
   const dayLineMatches = corpus.match(/(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*:\s*[^\n]+/ig) || []
   const map = {}
-
-  // Expand ranges
   for (const rm of rangeMatches) {
     const lines = expandRange(rm)
     if (lines) Object.assign(map, lines)
   }
-
-  // Direct day lines like "Monday: 09:00 AM - 05:00 PM" or "Monday: 8am - 7pm"
   for (const dl of dayLineMatches) {
     const m = dl.match(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*:\s*(.*)$/i)
     if (!m) continue
     const day = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()
     const times = m[2].trim()
-
-    if (/closed/i.test(times)) {
-      map[day] = `${day}: Closed`
-      continue
-    }
-
-    // Parse "8am - 7pm" | "08:00 - 19:00"
+    if (/closed/i.test(times)) { map[day] = `${day}: Closed`; continue }
     const tm = times.match(/^([0-9: ]+(?:am|pm)?)\s*[-–]\s*([0-9: ]+(?:am|pm)?)$/i)
     if (tm) {
       const o = parseTimeToken(tm[1]); const c = parseTimeToken(tm[2])
-      if (o && c) {
-        map[day] = `${day}: ${toAmPm(o.h, o.m)} - ${toAmPm(c.h, c.m)}`
-      }
+      if (o && c) map[day] = `${day}: ${toAmPm(o.h, o.m)} - ${toAmPm(c.h, c.m)}`
     }
   }
-
-  // Only return if we have ALL seven days
   const lines = FULL_DAYS.map(d => map[d] || null)
   if (lines.every(Boolean)) return lines.join('\n')
   return 'None'
 }
-
 function fixHoursFormatting(modelHours, corpus) {
-  // If model returned concatenated or incorrect, try to split/normalize; else fall back to corpus
-  if (!modelHours || modelHours === 'None') {
-    return normalizeHoursFromCorpus(corpus)
-  }
+  if (!modelHours || modelHours === 'None') return normalizeHoursFromCorpus(corpus)
   let s = String(modelHours).replace(/\r/g, '').trim()
-
-  // Insert newlines before each full day if missing
   s = s.replace(/\s*(Monday:)/g, '\n$1')
        .replace(/\s*(Tuesday:)/g, '\n$1')
        .replace(/\s*(Wednesday:)/g, '\n$1')
@@ -264,15 +298,9 @@ function fixHoursFormatting(modelHours, corpus) {
        .replace(/\s*(Sunday:)/g, '\n$1')
        .trim()
   const lines = s.split(/\n+/).map(x => x.trim()).filter(Boolean)
-
-  // Validate exact format
   const re = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday):\s*(?:Closed|(\d{2}:\d{2}\s(?:AM|PM))\s-\s(\d{2}:\d{2}\s(?:AM|PM)))$/
   const ok = FULL_DAYS.every(day => lines.some(l => re.test(l) && l.startsWith(day + ':')))
-  if (!ok) {
-    // fallback: try corpus extraction
-    return normalizeHoursFromCorpus(corpus)
-  }
-  // Return as-is (already one line per day)
+  if (!ok) return normalizeHoursFromCorpus(corpus)
   return lines.join('\n')
 }
 
@@ -317,7 +345,6 @@ const ALLOWED_CLIENT_BASE = new Set([
   'government',
   'non-profit'
 ])
-
 function enforceClientBase(value) {
   const v = (value || '').trim().toLowerCase()
   return ALLOWED_CLIENT_BASE.has(v) ? v : 'residential'
@@ -328,26 +355,16 @@ const BANNED_PHRASES = [
   'trusted by','relied on by','endorsed by','preferred by','backed by',
   'Free','Save','Best','New','Limited','Exclusive','Instant','Now','Proven','Sale','Bonus','Act Fast','Unlock'
 ]
-
 function containsBanned(text) {
   const lower = (text || '').toLowerCase()
   return BANNED_PHRASES.some(p => lower.includes(p.toLowerCase()))
 }
-
 function sanitizeDescription(text) {
   let t = (text || '').replace(/[\*\[\]]/g, '') // remove forbidden characters
   if (t.length > 900) t = t.slice(0, 900)
   t = t.replace(/https?:\S+/g, '')
-  // remove accidental headers
   t = t.replace(/^\s*Business\s*Description\s*:?\s*/i, '')
   return t.trim()
-}
-
-function ensureHeaderBlocks(str) {
-  return String(str || '')
-    .replace(/\r/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
 }
 
 // ====== Handler ======
@@ -391,7 +408,7 @@ export default async function handler(req, res) {
       ? 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
       : 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
 
-    // ====== Model for judgment fields ======
+    // ====== Model (judgment fields) ======
     const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
 
 INFORMATION SOURCE:
@@ -483,10 +500,11 @@ ${corpus}
     }
 
     // Enforce/clean model fields
-    let desc0 = sanitizeDescription(String(payload.description || ''))
-    let clientBase = enforceClientBase(payload.clientBase)
+    const ALLOWED_CLIENT_BASE = new Set(['residential','commercial','residential and commercial','government','non-profit'])
+    const clientBase = ALLOWED_CLIENT_BASE.has(String(payload.clientBase || '').toLowerCase()) ? String(payload.clientBase).toLowerCase() : 'residential'
 
-    // Re-write description to exact template + neutralize (second pass)
+    // Description: rewrite to exact template and append client base sentence
+    let desc0 = sanitizeDescription(String(payload.description || ''))
     const descRewrite = await callOpenAI(
       'Return ONLY the following text, <=900 chars, neutral tone, no promotional words, no links:\nTemplate: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."',
       desc0
@@ -495,6 +513,7 @@ ${corpus}
     if (!/[.!?]$/.test(description)) description += '.'
     description += ` The business provides services to ${clientBase} customers.`
     if (containsBanned(description)) {
+      // last-resort scrub
       for (const p of BANNED_PHRASES) {
         const re = new RegExp(p, 'gi')
         description = description.replace(re, '')
@@ -502,7 +521,7 @@ ${corpus}
       description = sanitizeDescription(description)
     }
 
-    // Products & Services
+    // Products & Services (capitalized comma list)
     let productsAndServices = String(payload.productsAndServices || 'None') || 'None'
     if (productsAndServices !== 'None') {
       const items = productsAndServices.split(',').map(s => s.trim()).filter(Boolean).map(s =>
@@ -511,10 +530,10 @@ ${corpus}
       productsAndServices = uniq(items).join(', ')
     }
 
-    // Hours: normalize/validate (one line per day or None)
+    // Hours of Operation (one per line or None)
     let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus)
 
-    // Licenses: format each block and ensure blank line after each block
+    // Licenses: ensure every field label present; blank line between licenses
     let licenseNumbers = String(payload.licenseNumbers || 'None') || 'None'
     if (licenseNumbers !== 'None') {
       const blocks = licenseNumbers.split(/\n{2,}/).map(b => b.trim()).filter(Boolean).map(b => {
@@ -538,7 +557,7 @@ ${corpus}
     const secs = Math.floor((elapsed % 60000) / 1000)
     const timeTaken = `${mins} minute${mins === 1 ? '' : 's'} ${secs} second${secs === 1 ? '' : 's'}`
 
-    // Final response (plain text fields, with proper newlines)
+    // Final response
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
       url: parsed.href,
@@ -551,14 +570,14 @@ ${corpus}
 
       hoursOfOperation, // one line per day or "None"
 
-      addresses: ensureHeaderBlocks(addresses.length ? addresses.join('\n\n') : 'None'), // includes USA + blank line
-      phoneNumbers: ensureHeaderBlocks(phones.length ? phones.join('\n') : 'None'),      // one per row
-      emailAddresses: ensureHeaderBlocks(emails.length ? emails.join('\n') : 'None'),    // one per row
-      socialMediaUrls: ensureHeaderBlocks(socialFound.length ? socialFound.join('\n') : 'None'), // one per row
+      addresses: ensureHeaderBlocks(addressesBlock), // includes USA + blank line between
+      phoneNumbers: ensureHeaderBlocks(phoneNumbers), // one per row
+      emailAddresses: ensureHeaderBlocks(emailAddresses), // one per row
+      socialMediaUrls: ensureHeaderBlocks(socialMediaUrls), // one per row (canonicalized)
 
       licenseNumbers: ensureHeaderBlocks(licenseNumbers),
       methodsOfPayment,
-      bbbSeal: bbbSealPlain, // plain text, no HTML
+      bbbSeal: bbbSealPlain, // plain text
       serviceArea,
       refundAndExchangePolicy
     }))
