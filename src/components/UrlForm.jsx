@@ -1,76 +1,66 @@
-import React, { useState } from 'react';
+import React, { useCallback } from 'react'
 
 export default function UrlForm({ onSubmit, loading, value, onChange, inputRef }) {
-  const [touched, setTouched] = useState(false);
-
-  const handleChange = (e) => {
-    onChange(e.target.value);
-    setTouched(true);
-  };
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (value.trim()) {
-      onSubmit(value.trim());
-    } else {
-      setTouched(true);
+  const handleSubmit = useCallback(e => {
+    e.preventDefault()
+    if (value && !loading) {
+      onSubmit(value)
     }
-  };
+  }, [onSubmit, value, loading])
 
   return (
-    <form onSubmit={handleSubmit} style={{
-      display: 'flex',
-      gap: 12,
-      marginTop: 0,
-      marginBottom: 0,
-      alignItems: 'center',
-      fontFamily: 'Arial, sans-serif'
-    }}>
-      <label htmlFor="website-url" style={{ fontWeight: 500 }}>
-        Website URL:
-      </label>
+    <form
+      onSubmit={handleSubmit}
+      style={{
+        display: 'flex',
+        gap: 10,
+        alignItems: 'center',
+        marginBottom: 10,
+        fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial'
+      }}
+      autoComplete="off"
+    >
       <input
-        id="website-url"
         ref={inputRef}
         type="url"
-        placeholder="https://example.com/"
+        name="website"
+        placeholder="Enter business website URL (e.g., https://example.com)"
         value={value}
-        onChange={handleChange}
+        onChange={e => onChange(e.target.value)}
         disabled={loading}
-        required
         style={{
           flex: 1,
-          padding: '8px 10px',
-          fontSize: 16,
-          border: '1px solid #bbb',
+          padding: '12px 14px',
+          border: '1.5px solid #c4c4c4',
           borderRadius: 8,
-          fontFamily: 'Arial, sans-serif'
+          fontSize: 17,
+          fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial',
+          outline: 'none'
         }}
-        autoComplete="off"
+        required
+        autoFocus
+        autoCapitalize="off"
+        autoCorrect="off"
+        spellCheck={false}
       />
       <button
         type="submit"
-        disabled={loading || !value.trim()}
+        disabled={loading || !value}
         style={{
+          padding: '12px 22px',
+          borderRadius: 8,
+          border: 'none',
+          fontWeight: 600,
+          fontSize: 17,
           background: '#00965E',
           color: '#fff',
-          fontWeight: 600,
-          border: 'none',
-          borderRadius: 8,
-          padding: '8px 18px',
-          fontSize: 16,
-          cursor: loading ? 'not-allowed' : 'pointer',
-          fontFamily: 'Arial, sans-serif',
-          boxShadow: loading ? 'none' : '0 1px 3px rgba(0,0,0,0.08)'
+          cursor: loading || !value ? 'not-allowed' : 'pointer',
+          transition: 'background 0.15s',
+          fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial'
         }}
       >
         {loading ? 'Generating…' : 'Generate'}
       </button>
-      {touched && !value.trim() && (
-        <span style={{ color: 'red', marginLeft: 8, fontFamily: 'Arial, sans-serif', fontSize: 14 }}>
-          Please enter a valid URL
-        </span>
-      )}
     </form>
-  );
+  )
 }
