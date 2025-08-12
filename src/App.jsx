@@ -1,17 +1,32 @@
 import React, { useState, useRef } from 'react'
 import UrlForm from './components/UrlForm'
 
+function OutputBlock({ label, value, isHtml, extraStyle }) {
+  if (!value || value === 'None') return null
+  return (
+    <div style={{ marginBottom: 18, fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial', ...extraStyle }}>
+      <strong>{label}</strong><br />
+      {isHtml
+        ? <span dangerouslySetInnerHTML={{ __html: value }} />
+        : <span style={{ whiteSpace: 'pre-line' }}>{value}</span>
+      }
+    </div>
+  )
+}
+
 export default function App() {
   const [url, setUrl] = useState('')
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const inputRef = useRef(null)
+  const [elapsed, setElapsed] = useState(null)
 
   const handleSubmit = async (submittedUrl) => {
     const useUrl = (submittedUrl || url || '').trim()
     setError('')
     setResult(null)
+    setElapsed(null)
     setLoading(true)
     try {
       const res = await fetch('/api/generate', {
@@ -24,11 +39,13 @@ export default function App() {
         if (res.status === 400 || res.status === 422) {
           throw new Error(text || 'Please check the website URL and try again.')
         } else {
+          console.error('Server error:', res.status, text)
           throw new Error('We couldn’t generate a description right now. Please try another URL or try again later.')
         }
       }
       const data = await res.json()
       setResult(data)
+      setElapsed(data.elapsed)
     } catch (e) {
       setError(e.message || 'Something went wrong. Please try again later.')
     } finally {
@@ -40,60 +57,113 @@ export default function App() {
     setUrl('')
     setResult(null)
     setError('')
+    setElapsed(null)
     if (inputRef.current) inputRef.current.focus()
   }
 
-  // Helper to safely render newlines (for addresses, emails, phone, etc)
-  function renderMultiline(text) {
-    if (!text || text === 'None') return <span style={{ color: '#888' }}>None</span>
-    return text.split('\n').map((line, i) =>
-      <React.Fragment key={i}>
-        {line}
-        <br />
-      </React.Fragment>
+  function formatElapsed(ms) {
+    if (!ms) return null
+    const mins = Math.floor(ms / 60000)
+    const secs = Math.round((ms % 60000) / 1000)
+    return `${mins > 0 ? `${mins} min${mins > 1 ? 's' : ''} ` : ''}${secs} sec`
+  }
+
+  // Output formatting helpers
+  function displayBusinessDescription() {
+    if (!result?.description || !result?.clientBase) return null
+    return (
+      <OutputBlock
+        label="Business Description:"
+        value={`${result.description} The business provides services to ${result.clientBase} customers.`}
+      />
     )
   }
 
-  // Helper to render 3-line addresses, separated by blank line
-  function renderAddresses(text) {
-    if (!text || text === 'None') return <span style={{ color: '#888' }}>None</span>
-    return text.split('\n\n').map((addr, i) =>
-      <span key={i} style={{ display: 'block', marginBottom: 12 }}>
-        {addr.split('\n').map((line, j) =>
-          <React.Fragment key={j}>
-            {line}
+  function displayAddresses() {
+    if (!result?.addresses || result.addresses === 'None') return null
+    // Ensure blank row after each full address block (triple-line format)
+    const parts = result.addresses.split(/\n{3,}/g)
+    return (
+      <div style={{ marginBottom: 18, fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
+        <strong>Address(es):</strong><br />
+        {parts.map((block, idx) => (
+          <span key={idx}>
+            {block.trim().split('\n').map((line, i) =>
+              <span key={i}>{line}<br /></span>
+            )}
             <br />
-          </React.Fragment>
-        )}
-      </span>
+          </span>
+        ))}
+      </div>
     )
   }
 
-  // Helper to render License Numbers in multi-line blocks
-  function renderLicenseNumbers(text) {
-    if (!text || text === 'None') return <span style={{ color: '#888' }}>None</span>
-    return text.split('\n\n').map((block, i) =>
-      <span key={i} style={{ display: 'block', marginBottom: 12 }}>
-        {block.split('\n').map((line, j) =>
-          <React.Fragment key={j}>
-            {line}
-            <br />
-          </React.Fragment>
+  function displayPhones() {
+    if (!result?.phones || result.phones === 'None') return null
+    return (
+      <div style={{ marginBottom: 18, fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
+        <strong>Phone Number(s):</strong><br />
+        {result.phones.split('\n').map((num, idx) =>
+          <span key={idx}>{num.trim()}<br /></span>
         )}
-      </span>
+      </div>
+    )
+  }
+
+  function displayLicenseNumbers() {
+    if (!result?.licenseNumbers || result.licenseNumbers === 'None') return null
+    const licenses = result.licenseNumbers.split(/\n\s*\n/g)
+    return (
+      <div style={{ marginBottom: 18, fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
+        <strong>License Number(s):</strong><br />
+        {licenses.map((block, idx) =>
+          <span key={idx}>
+            {block.trim().split('\n').map((line, i) =>
+              <span key={i}>{line}<br /></span>
+            )}
+            <br />
+          </span>
+        )}
+      </div>
+    )
+  }
+
+  function displayEmails() {
+    if (!result?.emails || result.emails === 'None') return null
+    return (
+      <div style={{ marginBottom: 18, fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
+        <strong>Email Addresses:</strong><br />
+        {result.emails.split('\n').map((email, idx) =>
+          <span key={idx}>{email.trim()}<br /></span>
+        )}
+      </div>
+    )
+  }
+
+  function displaySocialMedia() {
+    if (!result?.socialMedia || result.socialMedia === 'None') return null
+    const lines = Array.from(new Set(result.socialMedia.split('\n').map(s => s.trim()).filter(Boolean)))
+    return (
+      <div style={{ marginBottom: 18, fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
+        <strong>Social Media URLs:</strong><br />
+        {lines.map((line, idx) =>
+          <span key={idx}>{line}<br /></span>
+        )}
+      </div>
+    )
+  }
+
+  function displayBbbSeal() {
+    if (!result?.bbbSeal) return null
+    // allow raw HTML for red "NOT FOUND" if present
+    return (
+      <OutputBlock label="BBB Seal on Website:" value={result.bbbSeal} isHtml />
     )
   }
 
   return (
-    <div
-      style={{
-        maxWidth: 860,
-        margin: '40px auto',
-        padding: '0 16px',
-        fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto'
-      }}
-    >
-      {/* Header */}
+    <div style={{ maxWidth: 900, margin: '40px auto', padding: '0 16px', fontFamily: 'Arial, system-ui, -apple-system, Segoe UI, Roboto, Arial' }}>
+      {/* Header with BBB logo */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
         <img
           src="/bbb-logo.png"
@@ -101,8 +171,10 @@ export default function App() {
           style={{ height: 40, width: 40, objectFit: 'contain' }}
         />
         <div>
-          <h1 style={{ fontSize: 28, margin: 0 }}>Obtain Information from Business Website for their BBB B</h1>
-          <p style={{ color: '#444', margin: 0 }}>This will generate the text of the BBB Business Profile Description Overview, also known as About This Business. It will also generate data for Owner Demographic, Social Media URLs, Hours of Operation, Phone Number(s), Address for the business, License Information, Methods of Payment, and Service Area from the information on their website.</p>
+          <h1 style={{ fontSize: 28, margin: 0, fontFamily: 'Arial' }}>Obtain Information from Businesses Website for their BBB Business Profile</h1>
+          <p style={{ color: '#444', margin: 0, fontFamily: 'Arial' }}>
+            This tool generates the BBB Business Profile Description and additional data points from the business's website.
+          </p>
         </div>
       </div>
 
@@ -113,17 +185,6 @@ export default function App() {
         value={url}
         onChange={setUrl}
         inputRef={inputRef}
-        generateBtnStyle={{
-          background: '#00965E',
-          color: '#fff',
-          border: 'none',
-          borderRadius: 8,
-          padding: '8px 16px',
-          fontFamily: 'Arial',
-          fontWeight: 600,
-          fontSize: 16,
-          cursor: 'pointer',
-        }}
       />
 
       {/* Actions row */}
@@ -131,110 +192,43 @@ export default function App() {
         <button
           type="button"
           onClick={handleReset}
-          disabled={loading && !error}
+          disabled={loading}
           style={{
-            padding: '8px 12px',
-            borderRadius: 8,
-            border: '1px solid #bbb',
-            background: '#f7f7f7',
-            cursor: 'pointer',
-            fontFamily: 'Arial'
-          }}
-        >
-          Start Again
+            background: '#ddd', color: '#222', border: 'none',
+            padding: '7px 18px', borderRadius: 6, cursor: 'pointer', fontFamily: 'Arial'
+          }}>
+          Reset
         </button>
       </div>
 
-      {/* Errors */}
-      {error && (
-        <div style={{ color: 'red', marginTop: 16, fontFamily: 'Arial' }}>{error}</div>
-      )}
-
-      {/* Loading */}
-      {loading && (
-        <div style={{ marginTop: 16, fontFamily: 'Arial' }}>Processing…</div>
-      )}
-
       {/* Results */}
+      {error && <div style={{ margin: '30px 0', color: '#d20000', fontSize: 18, fontFamily: 'Arial' }}>{error}</div>}
+
       {result && (
-        <div style={{ marginTop: 32, borderTop: '1px solid #ddd', paddingTop: 24, fontFamily: 'Arial' }}>
-          <div style={{ marginBottom: 16 }}>
-            <strong>Website URL:</strong><br />
-            <span>{result.url}</span>
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Business Description:</strong>
-            <p style={{ whiteSpace: 'pre-wrap', marginTop: 8 }}>
-              {(result.description && result.clientBase)
-                ? `${result.description} The business provides services to ${result.clientBase} customers.`
-                : (result.description || <span style={{ color: '#888' }}>None</span>)
-              }
-            </p>
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Client Base:</strong><br />
-            <span>{result.clientBase || <span style={{ color: '#888' }}>None</span>}</span>
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Owner Demographic:</strong><br />
-            <span>{result.ownerDemographic || <span style={{ color: '#888' }}>None</span>}</span>
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Products and Services:</strong><br />
-            <span>{result.products || <span style={{ color: '#888' }}>None</span>}</span>
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Hours of Operation:</strong><br />
-            {renderMultiline(result.hours)}
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Address(es):</strong><br />
-            {renderAddresses(result.addresses)}
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Phone Number(s):</strong><br />
-            {renderMultiline(result.phoneNumbers)}
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Social Media URLs:</strong><br />
-            {renderMultiline(result.socialMediaUrls)}
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>License Number(s):</strong><br />
-            {renderLicenseNumbers(result.licenseNumbers)}
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>BBB Seal on Website:</strong><br />
-            {result.bbbSeal.startsWith('NOT FOUND')
-              ? <span style={{ color: 'red' }}>{result.bbbSeal}</span>
-              : result.bbbSeal
-            }
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Email Addresses:</strong><br />
-            {renderMultiline(result.emailAddresses)}
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Methods of Payment:</strong><br />
-            <span>{result.paymentMethods || <span style={{ color: '#888' }}>None</span>}</span>
-          </div>
-
-          <div style={{ marginBottom: 16 }}>
-            <strong>Service Area:</strong><br />
-            <span>{result.serviceArea || <span style={{ color: '#888' }}>None</span>}</span>
-          </div>
+        <div style={{
+          marginTop: 28, background: '#fcfcfc', borderRadius: 16, boxShadow: '0 2px 16px 0 #0002',
+          padding: '24px 28px', fontSize: 17, fontFamily: 'Arial', lineHeight: 1.7
+        }}>
+          {/* Elapsed time */}
+          {elapsed &&
+            <div style={{ marginBottom: 20, color: '#222', fontWeight: 600, fontFamily: 'Arial' }}>
+              Generated in {formatElapsed(elapsed)}
+            </div>
+          }
+          <OutputBlock label="Website URL:" value={result.url} />
+          {displayBusinessDescription()}
+          <OutputBlock label="Owner Demographic:" value={result.ownerDemographic} />
+          <OutputBlock label="Products and Services:" value={result.productsServices} />
+          <OutputBlock label="Hours of Operation:" value={result.hours} />
+          {displayAddresses()}
+          {displayPhones()}
+          {displaySocialMedia()}
+          {displayLicenseNumbers()}
+          {displayEmails()}
+          <OutputBlock label="Methods of Payment:" value={result.paymentMethods} />
+          {displayBbbSeal()}
+          <OutputBlock label="Service Area:" value={result.serviceArea} />
+          <OutputBlock label="Refund and Exchange Policy:" value={result.refundExchangePolicy} />
         </div>
       )}
     </div>
