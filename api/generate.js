@@ -176,23 +176,35 @@ function extractPaymentMethods(text) {
   return found.length ? found.join('\n') : 'None'
 }
 
+// Data point 4: Properly format, comma-separated, first letter capitalized per word
 function extractProductsAndServices(text) {
-  // Use OpenAI for more accurate extraction, but here's a fallback for demonstration
-  // You may want to update this to use OpenAI if quality isn't good enough
-  const services = []
+  // Use OpenAI for more accurate extraction if desired, this is a fallback
+  const matches = []
   const lines = text.split('\n')
   for (let l of lines) {
-    if (/services|products|offer/i.test(l)) {
-      let items = l.split(/,| and |\bor\b/)
+    if (/services|products|offer|specializes in|our/i.test(l)) {
+      let items = l.split(/,| and |\bor\b|•|-|\u2022/)
       for (let item of items) {
-        let cleaned = item.replace(/products?|services?|offered?|include|offering|we offer|we provide|our|:/gi, '').trim()
-        if (cleaned && cleaned.length <= 40 && !services.includes(cleaned)) {
-          services.push(cleaned)
+        let cleaned = item.replace(/products?|services?|offered?|include|including|offering|we offer|we provide|our|specializes in|:|•|-|\u2022/gi, '').trim()
+        // No promotional words
+        if (
+          cleaned &&
+          cleaned.length <= 40 &&
+          !matches.includes(cleaned) &&
+          !/free shipping|quality assurance|product warranty|customer service|extra services|prunes/i.test(cleaned)
+        ) {
+          // Capitalize each word
+          cleaned = cleaned.split(' ')
+            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+            .join(' ')
+          matches.push(cleaned)
         }
       }
     }
   }
-  return services.length ? services.join('\n') : 'None'
+  // Remove dups, filter out empty
+  const unique = [...new Set(matches)].filter(x => x && x.length <= 40)
+  return unique.length ? unique.join(', ') : 'None'
 }
 
 // Extract US-style addresses (3-line, only with city, state, zip; ignore PO Boxes, emails)
@@ -202,7 +214,6 @@ function extractAddresses(text) {
   let match
   while ((match = addressRegex.exec(text))) {
     let [_, line1, city, state, zip] = match
-    // Exclude PO Box
     if (/p\.?\s*o\.?\s*box/i.test(line1)) continue
     let addr = `${line1.trim()}\n${city.trim()}, ${state} ${zip}\nUS`
     matches.push(addr)
@@ -212,7 +223,6 @@ function extractAddresses(text) {
 
 // Extract hours of operation (example fallback, replace with OpenAI extraction for accuracy)
 function extractHours(text) {
-  // If you want bulletproof extraction, use OpenAI instead!
   const days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
   const regex = new RegExp(days.join('|'), 'gi')
   if (!regex.test(text)) return 'None'
@@ -224,7 +234,6 @@ function extractHours(text) {
       let [_, open, close] = m
       out.push(`${day}: ${open.toUpperCase()} - ${close.toUpperCase()}`)
     } else {
-      // Look for Closed
       if (new RegExp(`${day}:?\\s*Closed`, 'i').test(text)) {
         out.push(`${day}: Closed`)
       } else {
@@ -236,7 +245,6 @@ function extractHours(text) {
 }
 
 function extractPhoneNumbers(text) {
-  // US phone, various formats
   const phoneRegex = /(?:\+1[\s\-\.])?\(?([2-9]\d{2})\)?[\s\-\.]?(\d{3})[\s\-\.]?(\d{4})(?:\s*(?:x|ext\.?|extension)\s*(\d{1,6}))?/g
   const numbers = []
   let match
@@ -249,8 +257,8 @@ function extractPhoneNumbers(text) {
   return numbers.length ? numbers.join('\n') : 'None'
 }
 
+// Data point 11: Always return None if empty
 function extractEmails(text) {
-  // very basic email
   const emailRegex = /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g
   const emails = new Set()
   let match
@@ -262,7 +270,6 @@ function extractEmails(text) {
 
 // Extract license info: basic regex for License, State, Type, Status, Exp Date
 function extractLicenses(text) {
-  // naive: look for lines with "license" and key fields
   const lines = text.split('\n')
   const results = []
   for (let l of lines) {
@@ -288,7 +295,6 @@ function extractLicenses(text) {
 
 // Social media URLs
 function extractSocialMediaUrls(htmls) {
-  // Always return only URLs with a path (not root)
   const patterns = {
     Facebook: /https?:\/\/(?:www\.)?facebook\.com\/[A-Za-z0-9_.-]+/gi,
     Instagram: /https?:\/\/(?:www\.)?instagram\.com\/[A-Za-z0-9_.-]+/gi,
@@ -308,7 +314,6 @@ function extractSocialMediaUrls(htmls) {
       const matches = html.match(regex)
       if (matches) {
         for (const url of matches) {
-          // only export if has path after .com/
           if (/\.com\/[^\/\s]+/.test(url) || /\.net\/[^\/\s]+/.test(url)) {
             found.push(`${platform}: ${url}`)
           }
@@ -319,14 +324,32 @@ function extractSocialMediaUrls(htmls) {
   return found.length ? Array.from(new Set(found)).join('\n') : 'None'
 }
 
-// BBB Seal
+// BBB Seal (data point 10) - NOT FOUND output in red
 function extractBbbSeal(htmls, text) {
-  // Look for image srcs with "bbb" or "accredited", or text "BBB Accredited"
   for (const html of htmls) {
-    if (/img[^>]+(?:bbb|accredited)/i.test(html)) return 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
+    if (/img[^>]+(?:bbb|accredited)/i.test(html)) {
+      return 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
+    }
   }
-  if (/BBB Accredited/i.test(text)) return 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
-  return 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
+  if (/BBB Accredited/i.test(text)) {
+    return 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
+  }
+  // Output red font for NOT FOUND (html encoded)
+  return '<span style="color:#c00;font-weight:bold;">NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.</span>'
+}
+
+// Data point 13: Service Area
+function extractServiceArea(text) {
+  // Try to match patterns like "serving [territory...]" or "service area includes [..]"
+  const areas = []
+  const serviceRegex = /\b(serving|service area(?: includes)?|areas we serve|providing service to)\b[:\-]?\s*([A-Za-z0-9,\s\-]+[\.]?)/gi
+  let match
+  while ((match = serviceRegex.exec(text))) {
+    let phrase = (match[2] || '').replace(/\.\s*$/, '').trim()
+    // Avoid repeats, trim, filter empty
+    if (phrase && !areas.includes(phrase)) areas.push(phrase)
+  }
+  return areas.length ? areas.join(', ') : 'None'
 }
 
 export default async function handler(req, res) {
@@ -416,6 +439,7 @@ IMPORTANT: Ensure your description (<=900 chars) contains no promotional languag
     const emails = extractEmails(corpus)
     const paymentMethods = extractPaymentMethods(corpus)
     const bbbSeal = extractBbbSeal(htmls, corpus)
+    const serviceArea = extractServiceArea(corpus)
 
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
@@ -431,7 +455,8 @@ IMPORTANT: Ensure your description (<=900 chars) contains no promotional languag
       licenseNumbers,
       emails,
       paymentMethods,
-      bbbSeal
+      bbbSeal,
+      serviceArea
     }))
   } catch (err) {
     console.error('API ERROR:', err, err.stack)
