@@ -762,16 +762,29 @@ ${corpus}
 
     // Licenses (ensure labels; blank line between blocks)
     let licenseNumbers = String(payload.licenseNumbers || 'None') || 'None'
-    if (licenseNumbers !== 'None') {
-      const blocks = licenseNumbers.split(/\n{2,}/).map(b => b.trim()).filter(Boolean).map(b => {
-        const get = (label) => {
-          const m = b.match(new RegExp(`${label}:\\s*(.*)`, 'i'))
-          return (m && m[1] && m[1].trim()) || 'None'
-        }
-        return `License Number: ${get('License Number')}\nIssuing Authority: ${get('Issuing Authority')}\nLicense Type: ${get('License Type')}\nStatus: ${get('Status')}\nExpiration Date: ${get('Expiration Date')}`
-      })
-      licenseNumbers = uniq(blocks).join('\n\n')
-    }
+    
+  if (licenseNumbers !== 'None') {
+  const blocks = licenseNumbers
+    .split(/(?:\n\s*){2,}/)
+    .map(b => b.trim())
+    .filter(Boolean)
+    .map(b => {
+      const get = (label) => {
+        const m = b.match(new RegExp(`${label}:\\s*(.*)`, 'i'))
+        return (m && m[1] && m[1].trim()) || 'None'
+      }
+      return [
+        `License Number: ${get('License Number')}`,
+        `Issuing Authority: ${get('Issuing Authority')}`,
+        `License Type: ${get('License Type')}`,
+        `Status: ${get('Status')}`,
+        `Expiration Date: ${get('Expiration Date')}`,
+        '' // Blank row after each license
+      ].join('\n')
+    })
+  licenseNumbers = uniq(blocks).join('\n')
+}
+
 
     let ownerDemographic = String(payload.ownerDemographic || 'None') || 'None'
     let methodsOfPayment = String(payload.methodsOfPayment || 'None') || 'None'
