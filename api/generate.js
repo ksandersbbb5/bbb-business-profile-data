@@ -1,4 +1,3 @@
-// api/generate.js
 import * as cheerio from 'cheerio'
 
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
@@ -50,10 +49,7 @@ function extractVisibleText(html) {
   return $('body').text().replace(/\s+/g, ' ').trim()
 }
 
-/**
- * Crawl home + depth-1 same-origin pages.
- * Returns: { text: string, hrefs: string[] }
- */
+/** Crawl home + depth-1 same-origin pages. Returns { text, hrefs } */
 async function crawl(rootUrl) {
   const start = new URL(rootUrl)
   const visited = new Set()
@@ -70,32 +66,23 @@ async function crawl(rootUrl) {
       const html = await fetchHtml(current)
       const $ = cheerio.load(html)
 
-      // text
       $('script, style, noscript, svg, iframe').remove()
       const t = $('body').text().replace(/\s+/g, ' ').trim()
       if (t) texts.push(t)
 
-      // collect anchors (for social detection)
       $('a[href]').each((_, el) => {
         const href = $(el).attr('href')
         if (!href) return
         try {
           const abs = new URL(href, start.href)
           hrefs.push(abs.href)
-
-          // enqueue only same-origin, depth <= 1
           if (sameOrigin(start, abs) && pathLevel(abs) <= 1) {
             if (!visited.has(abs.href) && queue.length < 25) queue.push(abs.href)
           }
-        } catch {
-          // ignore bad hrefs
-        }
+        } catch {}
       })
-    } catch {
-      // ignore per-page failures
-    }
+    } catch {}
   }
-
   return { text: texts.join('\n\n'), hrefs }
 }
 
@@ -175,15 +162,13 @@ function detectOwnerDemographic(text = '') {
   }
   return 'None'
 }
-/* --------------------------------------------------------------------- */
 
-/* ---------------- Products & Services helpers ---------------- */
+/* ---------------- Products & Services ---------------- */
 function cleanProductsAndServices(value) {
   if (!value) return 'None'
   const v = String(value).trim()
   return v || 'None'
 }
-/* ------------------------------------------------------------- */
 
 /* ---------------- Hours of Operation: validation ---------------- */
 const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
@@ -203,7 +188,6 @@ function normalizeHours(raw) {
   }
   return lines.join('\n')
 }
-/* -------------------------------------------------------------------- */
 
 /* ---------------- Address extraction (cleaned & stricter) ---------------- */
 const STREET_TYPES = [
@@ -224,10 +208,8 @@ function preCleanText(corpus) {
   if (!corpus) return ''
   let t = corpus
 
-  // Remove common nav/control phrases around addresses
   t = t.replace(NAV_NOISE_RE, ' ')
 
-  // Fix split words
   const fixPairs = [
     [/S\s*t\s*reet/gi, 'Street'],
     [/A\s*v\s*e\s*n\s*ue/gi, 'Avenue'],
@@ -251,19 +233,13 @@ function preCleanText(corpus) {
   ]
   for (const [re, rep] of fixPairs) t = t.replace(re, rep)
 
-  // Insert space if suite token glues to City word
   t = t.replace(/(Suite|Ste|Unit|Apt|#)\s*([A-Za-z0-9\-]+)(?=[A-Z][a-z])/g, '$1 $2 ')
-
-  // Normalize whitespace
   t = t.replace(/\s+/g, ' ').trim()
   return t
 }
 
 function titleCaseCity(s='') {
-  return s
-    .split(/\s+/)
-    .map(w => w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w)
-    .join(' ')
+  return s.split(/\s+/).map(w => w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w).join(' ')
 }
 
 const STREET_BLOCK =
@@ -292,7 +268,6 @@ function extractAddresses(corpus) {
   const text = preCleanText(corpus)
   const seen = new Set()
   const out = []
-
   let m
   while ((m = ADDRESS_RE.exec(text)) !== null) {
     const num = m[1] || ''
@@ -300,21 +275,15 @@ function extractAddresses(corpus) {
     const city = m[3] || ''
     const state = m[4] || ''
     const zip = m[5] || ''
-
     const line1Raw = `${num} ${streetBlock}`
     if (/p\.?\s*o\.?\s*box/i.test(line1Raw)) continue
     if (/@/.test(line1Raw)) continue
-
     const formatted = formatAddress(num, streetBlock, city, state, zip)
     const key = formatted.toLowerCase().replace(/\s+/g, ' ')
-    if (!seen.has(key)) {
-      seen.add(key)
-      out.push(formatted)
-    }
+    if (!seen.has(key)) { seen.add(key); out.push(formatted) }
   }
   return out.length ? out.join('\n\n') : 'None'
 }
-/* -------------------------------------------------------------------- */
 
 /* ---------------- Phone extraction (US only, format + ext) ---------------- */
 const PHONE_CANDIDATE =
@@ -333,35 +302,22 @@ function extractPhones(corpus) {
   while ((m = PHONE_CANDIDATE.exec(text)) !== null) {
     const raw = m[0]
     const idx = m.index
-
-    // Skip if nearby "fax"
-    const ctxStart = Math.max(0, idx - 16)
-    const ctxEnd = Math.min(text.length, idx + raw.length + 16)
-    const ctx = text.slice(ctxStart, ctxEnd)
+    const ctx = text.slice(Math.max(0, idx - 16), Math.min(text.length, idx + raw.length + 16))
     if (/\bfax\b/i.test(ctx)) continue
-
     let digits = raw.replace(/\D/g, '')
     if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1)
     if (digits.length !== 10) continue
-
     let formatted = formatPhone(digits)
-
-    // extension within small window after match
     const tail = text.slice(idx + raw.length, Math.min(text.length, idx + raw.length + 40))
     const extMatch = EXT_PATTERN.exec(tail)
     if (extMatch) {
       const extDigits = (extMatch[2] || '').replace(/\D/g,'')
       if (extDigits) formatted += ` ext. ${extDigits}`
     }
-
-    if (!seen.has(formatted)) {
-      seen.add(formatted)
-      results.push(formatted)
-    }
+    if (!seen.has(formatted)) { seen.add(formatted); results.push(formatted) }
   }
   return results.length ? results.join('\n') : 'None'
 }
-/* ------------------------------------------------------------------------- */
 
 /* ---------------- Social media URL extraction (root-only excluded) -------- */
 const SOCIAL_SITES = [
@@ -377,46 +333,198 @@ const SOCIAL_SITES = [
   { key: 'Threads', hosts: ['threads.net','threads.com'], exclude: [] },
   { key: 'Tumblr', hosts: ['tumblr.com'], exclude: [] }
 ]
-
-function normalizeUrl(u) {
-  try {
-    const url = new URL(u)
-    url.hash = '' // drop fragments
-    return url.toString()
-  } catch { return '' }
-}
-function hostMatches(hostname, hosts = []) {
-  const h = (hostname || '').toLowerCase()
-  return hosts.some(dom => h === dom || h.endsWith('.' + dom))
-}
-function pathExcluded(pathname, excludes = []) {
-  const p = (pathname || '').toLowerCase()
-  return excludes.some(x => p.includes(x.toLowerCase()))
-}
-function hasAtLeastOnePathSegment(pathname) {
-  const segs = (pathname || '').split('/').filter(Boolean)
-  return segs.length >= 1
-}
-
-function extractSocialMediaUrls(allHrefs = []) {
+function normalizeUrl(u) { try { const url = new URL(u); url.hash=''; return url.toString() } catch { return '' } }
+function hostMatches(hostname, hosts=[]) { const h=(hostname||'').toLowerCase(); return hosts.some(dom => h===dom || h.endsWith('.'+dom)) }
+function pathExcluded(pathname, excludes=[]) { const p=(pathname||'').toLowerCase(); return excludes.some(x => p.includes(x.toLowerCase())) }
+function hasAtLeastOnePathSegment(pathname) { return (pathname||'').split('/').filter(Boolean).length >= 1 }
+function extractSocialMediaUrls(allHrefs=[]) {
   const found = new Map()
   for (const raw of allHrefs) {
     const u = normalizeUrl(raw)
     if (!u) continue
-    let parsed
-    try { parsed = new URL(u) } catch { continue }
+    let parsed; try { parsed = new URL(u) } catch { continue }
     if (!/^https?:$/.test(parsed.protocol)) continue
-
     for (const site of SOCIAL_SITES) {
       const allHosts = site.allowHostsExtra ? site.hosts.concat(site.allowHostsExtra) : site.hosts
       if (!hostMatches(parsed.hostname, allHosts)) continue
-
       const pathname = parsed.pathname || '/'
-
       if (pathExcluded(pathname, site.exclude)) continue
       if (!hasAtLeastOnePathSegment(pathname)) continue
-
       const firstSeg = pathname.split('/').filter(Boolean)[0]?.toLowerCase() || ''
       if (['home','share'].includes(firstSeg)) continue
+      if (!found.has(site.key)) found.set(site.key, parsed.toString())
+    }
+  }
+  if (!found.size) return 'None'
+  return Array.from(found.entries())
+    .map(([label,url])=>`${label}: ${url}`)
+    .join('\n')
+}
 
-     
+/* ---------------- License info extraction (strict format) ---------------- */
+function formatLicenses(raw) {
+  if (!raw) return 'None'
+  if (typeof raw === 'string') {
+    if (raw.trim().toLowerCase() === 'none') return 'None'
+    return raw.trim()
+  }
+  if (Array.isArray(raw)) {
+    const lines = raw.map(line=>String(line||'').trim()).filter(Boolean)
+    return lines.length ? lines.join('\n') : 'None'
+  }
+  return 'None'
+}
+
+/* ==================== MAIN HANDLER ==================== */
+export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') return res.status(204).end()
+  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
+
+  try {
+    const body = await readJsonBody(req)
+    const { url } = body || {}
+    if (!url) return res.status(400).send('Missing url')
+
+    let parsed
+    try {
+      parsed = new URL(url)
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error('bad protocol')
+    } catch {
+      return res.status(400).send('Please enter a valid URL.')
+    }
+
+    // Crawl home + depth 1 pages only on same origin
+    const { text: corpus, hrefs: allHrefs } = await crawl(parsed.href)
+    if (!corpus || corpus.length < 40) {
+      return res.status(422).send('Could not extract enough content from the provided site.')
+    }
+
+    // --- Prompt ---
+    const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
+Strictly follow these rules for each data point.
+INFORMATION SOURCE: Use ONLY the provided website content.
+EXCLUSIONS: Do not reference other businesses in the industry. Exclude owner names, locations, hours of operation, and time-related information unless asked for that data point. Avoid the characters * [ ].
+DO NOT INCLUDE: promotional or marketing words/phrases; trust/endorsement/popularity language. Do not make up information.
+GENERAL GUIDELINES: Return plain text or None for missing/empty fields. Avoid advertising claims, business history, or storytelling.
+
+OUTPUT JSON with these keys only:
+description, clientBase, ownerDemographic, productsAndServices, hoursOfOperation, addresses, phoneNumbers, socialMediaUrls, licenseNumbers.
+
+DETAILS FOR EACH DATA POINT:
+1) Business Description (description):
+  - Max 900 chars, factual, no advertising.
+  - Do not use the phrases "Business Description" or "for more information".
+  - TEMPLATE: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."
+
+2) Client Base (clientBase): One of 'residential', 'commercial', 'residential and commercial', 'government', 'non-profit'. Default: 'residential'.
+
+3) Owner Demographic (ownerDemographic): Return ONLY one of the following (exact, case-insensitive match, else 'None'):
+${OWNER_CATEGORIES.join(',\n')}
+
+4) Products and Services (productsAndServices): List as 1-4 word category labels (no numbers/bullets, no service areas, no marketing tone, no sample list, 'None' if not found).
+
+5) Hours of Operation (hoursOfOperation): Format:
+Monday: 09:00 AM - 05:00 PM
+Tuesday: 09:00 AM - 05:00 PM
+...
+Sunday: Closed
+If any day is missing, return None.
+
+6) Addresses (addresses): Extract each valid physical address. Three lines per address:
+123 Main St, Suite 400
+Boston, MA 02108
+US
+Multiple addresses: separate by single blank line. No P.O. Boxes. If not found, return None.
+
+7) Phone Number(s) (phoneNumbers): All valid US phone numbers in format:
+(123) 456-7890
+Or with extension: (123) 456-7890 ext. 1234
+One per line. None if not found.
+
+8) Social Media URLs (socialMediaUrls): For each platform, output as:
+Facebook: https://facebook.com/username
+...
+Only include if there is at least one path segment after the domain (e.g. facebook.com/username). Do not include root domains (e.g. facebook.com/).
+
+9) License Number(s) (licenseNumbers): For each license, output as:
+License Number: ABC-123456
+Issuing Authority: State of California Department of Consumer Affairs
+License Type: General Contractor
+Status: Active
+Expiration Date: 12/31/2025
+If any field is missing, omit the line. Multiple licenses: separate with blank line. If none, return None.
+
+JSON OUTPUT ONLY. Do not add extra keys, text, or explanations.`;
+
+    const userPrompt = `Website URL: ${parsed.href}
+
+WEBSITE CONTENT (verbatim, may be long):
+
+${corpus}
+
+HREFS (all links):
+${allHrefs.join('\n')}
+
+IMPORTANT: Ensure all outputs are factual, neutral, and comply with the data point instructions.`;
+
+    let aiRaw = await callOpenAI(systemPrompt, userPrompt)
+
+    // Parse JSON
+    let payload
+    try {
+      const jsonMatch = aiRaw.match(/\{[\s\S]*\}$/)
+      payload = JSON.parse(jsonMatch ? jsonMatch[0] : aiRaw)
+    } catch {
+      const fix = await callOpenAI(
+        'Return ONLY valid JSON with keys description, clientBase, ownerDemographic, productsAndServices, hoursOfOperation, addresses, phoneNumbers, socialMediaUrls, licenseNumbers. No explanations.',
+        `Please convert the following into strict JSON: ${aiRaw}`
+      )
+      payload = JSON.parse(fix)
+    }
+
+    // --- Clean up / enforce ---
+    let description = String(payload.description || '')
+    let clientBase = enforceClientBase(payload.clientBase)
+    let ownerDemographic = detectOwnerDemographic(payload.ownerDemographic)
+    let productsAndServices = cleanProductsAndServices(payload.productsAndServices)
+    let hoursOfOperation = normalizeHours(payload.hoursOfOperation)
+    let addresses = extractAddresses(corpus)
+    let phoneNumbers = extractPhones(corpus)
+    let socialMediaUrls = extractSocialMediaUrls(allHrefs)
+    let licenseNumbers = formatLicenses(payload.licenseNumbers)
+
+    description = stripExcluded(description)
+    if (badWordPresent(description)) {
+      const neutral = await callOpenAI(
+        'Neutralize promotional language and remove forbidden words/characters. Return ONLY the text, <=900 chars.',
+        description
+      )
+      description = neutral
+    }
+    description = sanitize(description)
+    if (badWordPresent(description)) {
+      for (const p of BANNED_PHRASES) {
+        const re = new RegExp(p, 'gi')
+        description = description.replace(re, '')
+      }
+      description = sanitize(description)
+    }
+
+    res.setHeader('Content-Type', 'application/json')
+    return res.status(200).send(JSON.stringify({
+      url: parsed.href,
+      description,
+      clientBase,
+      ownerDemographic,
+      productsAndServices,
+      hoursOfOperation,
+      addresses,
+      phoneNumbers,
+      socialMediaUrls,
+      licenseNumbers
+    }))
+  } catch (err) {
+    const code = err.statusCode || 500
+    return res.status(code).send(err.message || 'Internal Server Error')
+  }
+}
