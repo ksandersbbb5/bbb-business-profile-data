@@ -26,7 +26,9 @@ async function fetchHtml(url) {
 function extractVisibleText(html) {
   const $ = cheerio.load(html)
   $('script, style, noscript, svg, iframe').remove()
+  // normalize pipes and fix common CMS breaks
   return $('body').text()
+    .replace(/\|/g, ' ')
     .replace(/\r/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n\s*\n+/g, '\n\n')
@@ -65,7 +67,7 @@ async function crawl(rootUrl) {
       })
     } catch {}
   }
-  return { corpus: texts.join('\n\n'), pages: htmls, origin: start.origin }
+  return { corpus: texts.join('\n\n'), pages: htmls }
 }
 
 // ====== Utilities ======
@@ -76,9 +78,6 @@ function ensureHeaderBlocks(str) {
     .replace(/\n{3,}/g, '\n\n')
     .trim()
 }
-function cleanInlineText(s) {
-  return String(s || '').replace(/\s+/g, ' ').trim()
-}
 
 // ====== Email ======
 function extractEmails(text) {
@@ -87,12 +86,10 @@ function extractEmails(text) {
 
 // ====== Phones (strict NANP) ======
 function isValidNanp(area, exch, line) {
-  // NANP rules: area & exchange cannot start with 0 or 1
   return /^[2-9]\d{2}$/.test(area) && /^[2-9]\d{2}$/.test(exch) && /^\d{4}$/.test(line)
 }
 function extractPhones(text) {
   const out = []
-  // Boundaries to avoid matching inside long digit strings/IDs
   const re = /(?<!\d)(?:\+?1[\s.\-]?)?(?:\(?(\d{3})\)?[\s.\-]?(\d{3})[\s.\-]?(\d{4}))(?:\s*(?:ext\.?|x|extension)\s*(\d+))?(?!\d)/gi
   let m
   while ((m = re.exec(text))) {
@@ -105,46 +102,64 @@ function extractPhones(text) {
   return uniq(out)
 }
 
-// ====== Addresses ======
-// Fix cases like "475\nWashington Street" caused by CMS line breaks
+// ====== Addresses (hardened) ======
+
+// Clean up CMS-induced splits like "475\nWashington Street"
 function normalizeAddressBreaks(text) {
-  // join split street numbers/names and common unit breaks
   return text
     .replace(/(\d{1,6})\s*\n\s*([A-Za-z])/g, '$1 $2')
-    .replace(/(\bSuite|#|Unit|Apt|Apartment)\s*\n\s*/gi, '$1 ')
+    .replace(/(\bSuite|Ste|#|Unit)\s*\n\s*/gi, '$1 ')
     .replace(/,\s*\n\s*/g, ', ')
+    .replace(/\|\s*/g, ' ')
 }
 
-// Require a street type to reduce false positives
+// Street types to require
 const STREET_TYPES = [
-  'St','Street','Ave','Avenue','Rd','Road','Blvd','Boulevard','Dr','Drive',
-  'Ln','Lane','Ct','Court','Pl','Place','Pkwy','Parkway','Hwy','Highway',
-  'Way','Terr','Terrace','Cir','Circle','Pike'
+  'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr',
+  'Lane','Ln','Court','Ct','Place','Pl','Parkway','Pkwy','Highway','Hwy',
+  'Way','Terrace','Terr','Circle','Cir','Pike'
 ]
 const STREET_TYPES_RE = new RegExp(`\\b(?:${STREET_TYPES.join('|')})\\b`, 'i')
 
+// Obvious nav/boilerplate tokens to reject in the street line
+const NAV_WORDS_RE = /\b(Home|About|Services|Contact|Reviews|Specials|Privacy|Terms|COVID|Update|Name:|Email:|Phone:|Menu)\b/i
+
 function extractAddresses(rawText) {
   const text = normalizeAddressBreaks(rawText)
-  // Allow optional commas and flexible whitespace/newlines
-  const re = /(\d{1,6}[^\n,]*?(?:\b(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Pl|Place|Pkwy|Parkway|Hwy|Highway|Way|Terr|Terrace|Cir|Circle|Pike)\b[^\n,]*)?)\s*,?\s*([A-Za-z][A-Za-z\s\.'-]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)/g
+
+  // Regex finds: "123 Main St[ ,optional suite] NEWLINE City, ST ZIP"
+  const re = new RegExp(
+    String.raw`(^|\n)\s*` +                   // line start
+    String.raw`(\d{1,6}\s+[A-Za-z0-9.\-# ]+?)` + // street number + name
+    String.raw`\s+(?:` + STREET_TYPES.join('|') + String.raw`)` + // required street type
+    String.raw`(?:\s*,?\s*(?:Suite|Ste|Unit|#)\s*\w+)?` +          // optional suite
+    String.raw`\s*[\n,]\s*` +               // separator to city line
+    String.raw`([A-Za-z][A-Za-z\s\.'-]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)` // City, ST ZIP
+  , 'gi')
+
   const out = []
   let m
   while ((m = re.exec(text))) {
-    let line1 = m[1].replace(/\s{2,}/g, ' ').trim()
-    const city = m[2].replace(/,$/, '').replace(/\s{2,}/g, ' ').trim()
-    const state = m[3].trim()
-    const zip = m[4].trim()
+    let street = (m[2] || '').replace(/\s{2,}/g, ' ').trim()
+    const city = (m[3] || '').replace(/\s{2,}/g, ' ').trim()
+    const state = (m[4] || '').trim()
+    const zip = (m[5] || '').trim()
 
     // Quality gates
-    if (!STREET_TYPES_RE.test(line1)) continue
-    const letters = (line1.match(/[A-Za-z]/g) || []).length
+    if (!street || !STREET_TYPES_RE.test(street)) continue
+    if (NAV_WORDS_RE.test(street)) continue
+    // avoid lines that are mostly digits or tiny
+    const letters = (street.match(/[A-Za-z]/g) || []).length
     if (letters < 3) continue
 
-    // Ensure comma before suite/unit if missing
-    line1 = line1.replace(/\s+(Suite|Ste|Unit|#)\s*/i, ', $1 ')
+    // ensure comma before suite/unit if missing
+    street = street.replace(/\s+(Suite|Ste|Unit|#)\s*/i, ', $1 ')
 
-    out.push(`${line1}\n${city}, ${state} ${zip}\nUSA`)
+    const addr = `${street}\n${city}, ${state} ${zip}\nUSA`
+    out.push(addr)
   }
+
+  // Prefer unique, stable ordering
   return uniq(out)
 }
 
@@ -153,7 +168,7 @@ function canonicalSocialUrl(href) {
   try {
     const u = new URL(href, 'https://example.com')
     const host = u.hostname.replace(/^www\./, '').toLowerCase()
-    let path = (u.pathname || '/').replace(/\/+$/, '') // strip trailing slash
+    let path = (u.pathname || '/').replace(/\/+$/, '')
     if (!path) path = '/'
     return `https://${host}${path}${u.search || ''}`
   } catch {
@@ -196,7 +211,6 @@ function extractSocialFromPages(pages) {
       } catch {}
     })
   }
-  // Dedup by canonical URL
   const seen = new Set()
   const lines = []
   for (const [key, url] of foundPairs) {
@@ -213,112 +227,19 @@ function detectBBBSeal(pages) {
   for (const { html } of pages) {
     const $ = cheerio.load(html)
     const bodyText = $('body').text()
-    // Text signal (exclude "site managed by BBB")
     if (/\bBBB Accredited\b/i.test(bodyText) && !/site managed by bbb/i.test(bodyText)) {
       found = true
     }
-    // Image filename signal (e.g., sscc-bbb-logos-footer.png)
     $('img[src]').each((_, img) => {
       const src = String($(img).attr('src') || '').toLowerCase()
-      if (src.includes('bbb') || src.includes('accredited')) found = true
+      if (src.includes('bbb') || src.includes('accredited') || src.includes('sscc-bbb-logos-footer')) found = true
     })
     if (found) break
   }
   return found
 }
 
-// ====== Lead Form (Data Point #15) ======
-function pickNearestHeading($, formOrLink) {
-  // Try aria-label/legend/label/placeholder/button first
-  const $node = $(formOrLink)
-  const aria = $node.attr('aria-label')
-  if (aria) return cleanInlineText(aria)
-
-  const legends = $node.find('legend').map((_, el) => $(el).text()).get()
-  if (legends[0]) return cleanInlineText(legends[0])
-
-  const buttons = $node.find('button, input[type=submit]').map((_, el) => $(el).text() || $(el).attr('value')).get()
-  if (buttons[0]) return cleanInlineText(buttons[0])
-
-  // Nearest previous heading
-  const headings = []
-  let prev = $node.prev()
-  let hops = 0
-  while (prev.length && hops < 6) {
-    if (/^h[1-6]$/i.test(prev[0].name)) {
-      headings.push(prev.text())
-      break
-    }
-    prev = prev.prev()
-    hops++
-  }
-  if (headings[0]) return cleanInlineText(headings[0])
-
-  // Fallback to page title if available
-  const title = $('title').first().text()
-  if (title) return cleanInlineText(title)
-
-  return ''
-}
-
-function detectLeadForm(pages, origin) {
-  const LINK_KEYWORDS = /(quote|consultation|request|service|book|schedule|estimate|appointment|get\s*a\s*quote|get\s*started|contact)/i
-  const FORM_HINT_INPUTS = /(name|email|phone|message|address|zip|city)/i
-  const candidates = []
-
-  for (const { url, html } of pages) {
-    const $ = cheerio.load(html)
-
-    // 1) Forms
-    $('form').each((_, f) => {
-      const $f = $(f)
-      const action = $f.attr('action') ? new URL($f.attr('action'), url).href : url
-      if (!action.startsWith(origin)) return
-
-      const textBlob = $f.text() + ' ' + $f.find('input,button,label').map((i, el) =>
-        ($(el).attr('placeholder') || '') + ' ' + ($(el).attr('aria-label') || '') + ' ' + ($(el).text() || '')
-      ).get().join(' ')
-
-      if (FORM_HINT_INPUTS.test(textBlob) || LINK_KEYWORDS.test(textBlob)) {
-        const title = pickNearestHeading($, f) || 'Lead Form'
-        candidates.push({ title, url: action })
-      }
-    })
-
-    // 2) Links/Buttons to lead pages
-    $('a[href], button').each((_, el) => {
-      const $el = $(el)
-      const href = $el.is('a') ? $el.attr('href') : ($el.attr('formaction') || '')
-      const text = cleanInlineText($el.text() || $el.attr('aria-label') || '')
-      if (!href && !LINK_KEYWORDS.test(text)) return
-      if (href) {
-        const abs = new URL(href, url)
-        if (!abs.href.startsWith(origin)) return
-        if (LINK_KEYWORDS.test(abs.pathname) || LINK_KEYWORDS.test(text)) {
-          const title = text || pickNearestHeading($, el) || 'Lead Form'
-          candidates.push({ title, url: abs.href })
-        }
-      }
-    })
-  }
-
-  // Pick best: prefer shortest path + strongest keyword appearance in title
-  const rank = (c) => {
-    const pathLen = (new URL(c.url)).pathname.length
-    const kwBoost = /(quote|estimate|request|schedule|book|consult|appointment)/i.test(c.title) ? -50 : 0
-    return pathLen + kwBoost
-  }
-  const dedup = new Map()
-  for (const c of candidates) {
-    const key = c.url
-    if (!dedup.has(key) || rank(c) < rank(dedup.get(key))) dedup.set(key, c)
-  }
-  const best = [...dedup.values()].sort((a,b) => rank(a) - rank(b))[0]
-  if (!best) return 'None'
-  return `Lead Form Title: ${best.title}\nLead Form URL: ${best.url}`
-}
-
-// ====== Hours normalization ======
+// ====== Hours normalization (unchanged core) ======
 const FULL_DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
 const DAY_ABBR = { Mon:'Monday', Tue:'Tuesday', Wed:'Wednesday', Thu:'Thursday', Thur:'Thursday', Fri:'Friday', Sat:'Saturday', Sun:'Sunday' }
 
@@ -398,6 +319,75 @@ function fixHoursFormatting(modelHours, corpus) {
   return lines.join('\n')
 }
 
+// ====== Lead Form detection (hardened) ======
+function detectLeadForm(pages, originUrl) {
+  const start = new URL(originUrl)
+  const domByUrl = new Map(pages.map(p => [p.url, cheerio.load(p.html)]))
+
+  // candidate link text/aria/labels
+  const INTENT = /(quote|estimate|consult|consultation|request|schedule|book|appointment|service|contact)/i
+
+  const candidates = []
+  for (const { url, html } of pages) {
+    const $ = cheerio.load(html)
+    $('a[href], button[onclick]').each((_, el) => {
+      let href = $(el).attr('href') || ''
+      const txt = ($(el).text() || '').trim()
+      const aria = ($(el).attr('aria-label') || '').trim()
+      const title = ($(el).attr('title') || '').trim()
+      const label = `${txt} ${aria} ${title}`.trim()
+
+      if (!INTENT.test(label)) return
+      if (!href) return
+      // buttons may use onclick or JS; skip those without href
+      try {
+        const abs = new URL(href, url)
+        if (abs.origin !== start.origin) return
+        if (abs.pathname === '/' || abs.hash === '#') return
+        candidates.push({ label, target: abs.href })
+      } catch {}
+    })
+  }
+
+  // verify destination has a real <form> with common fields
+  const FIELD_RE = /(name|email|phone|message|address)/i
+  function pageHasRealForm(u) {
+    const $ = domByUrl.get(u)
+    if (!$) return false
+    const forms = $('form')
+    if (!forms.length) return false
+    let hasField = false
+    forms.each((_, f) => {
+      const ff = $(f)
+      if (ff.find('input, textarea, select').filter((_, i) => {
+        const nm = ($(i).attr('name') || '').toLowerCase()
+        const pl = ($(i).attr('placeholder') || '').toLowerCase()
+        const lbFor = $(`label[for="${$(i).attr('id') || ''}"]`).text().toLowerCase()
+        return FIELD_RE.test(nm) || FIELD_RE.test(pl) || FIELD_RE.test(lbFor)
+      }).length) hasField = true
+    })
+    return hasField
+  }
+
+  // rank by deepest path and first occurrence
+  candidates.sort((a, b) => {
+    const ap = new URL(a.target).pathname.split('/').filter(Boolean).length
+    const bp = new URL(b.target).pathname.split('/').filter(Boolean).length
+    return bp - ap
+  })
+
+  for (const c of candidates) {
+    if (pageHasRealForm(c.target)) {
+      const title = c.label
+        .replace(/\s+/g, ' ')
+        .replace(/\s*\|\s*/g, ' ')
+        .trim()
+      return { title, url: c.target }
+    }
+  }
+  return null
+}
+
 // ====== Model Call ======
 async function callOpenAI(systemPrompt, userPrompt) {
   if (!OPENAI_API_KEY) {
@@ -454,7 +444,7 @@ function containsBanned(text) {
   return BANNED_PHRASES.some(p => lower.includes(p.toLowerCase()))
 }
 function sanitizeDescription(text) {
-  let t = (text || '').replace(/[\*\[\]]/g, '') // remove forbidden characters
+  let t = (text || '').replace(/[\*\[\]]/g, '')
   if (t.length > 900) t = t.slice(0, 900)
   t = t.replace(/https?:\S+/g, '')
   t = t.replace(/^\s*Business\s*Description\s*:?\s*/i, '')
@@ -482,7 +472,7 @@ export default async function handler(req, res) {
     }
 
     // Crawl site (home + depth 1)
-    const { corpus, pages, origin } = await crawl(parsed.href)
+    const { corpus, pages } = await crawl(parsed.href)
     if (!corpus || corpus.length < 40) {
       return res.status(422).send('Could not extract enough content from the provided site.')
     }
@@ -493,7 +483,7 @@ export default async function handler(req, res) {
     const addresses = extractAddresses(corpus)
     const socialFound = extractSocialFromPages(pages)
     const bbbFound = detectBBBSeal(pages)
-    const leadForm = detectLeadForm(pages, origin)
+    const lead = detectLeadForm(pages, parsed.href)
 
     const emailAddresses = emails.length ? emails.join('\n') : 'None'
     const phoneNumbers = phones.length ? phones.join('\n') : 'None'
@@ -594,8 +584,7 @@ ${corpus}
       payload = JSON.parse(fix)
     }
 
-    // Enforce/clean model fields
-    const clientBase = enforceClientBase(payload.clientBase)
+    const clientBase = enforceClientBase(String(payload.clientBase || 'residential'))
 
     // Description: rewrite to exact template and append client base sentence
     let desc0 = sanitizeDescription(String(payload.description || ''))
@@ -614,7 +603,7 @@ ${corpus}
       description = sanitizeDescription(description)
     }
 
-    // Products & Services (capitalized comma list)
+    // Products & Services
     let productsAndServices = String(payload.productsAndServices || 'None') || 'None'
     if (productsAndServices !== 'None') {
       const items = productsAndServices.split(',').map(s => s.trim()).filter(Boolean).map(s =>
@@ -623,10 +612,10 @@ ${corpus}
       productsAndServices = uniq(items).join(', ')
     }
 
-    // Hours of Operation (one per line or None)
+    // Hours (one per line or None)
     let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus)
 
-    // Licenses: ensure every field label present; blank line between licenses
+    // Licenses (ensure labels; blank line between blocks)
     let licenseNumbers = String(payload.licenseNumbers || 'None') || 'None'
     if (licenseNumbers !== 'None') {
       const blocks = licenseNumbers.split(/\n{2,}/).map(b => b.trim()).filter(Boolean).map(b => {
@@ -650,6 +639,16 @@ ${corpus}
     const secs = Math.floor((elapsed % 60000) / 1000)
     const timeTaken = `${mins} minute${mins === 1 ? '' : 's'} ${secs} second${secs === 1 ? '' : 's'}`
 
+    // Lead form (formatted)
+    let leadForm = 'None'
+    let leadFormTitle = ''
+    let leadFormUrl = ''
+    if (lead) {
+      leadFormTitle = lead.title || ''
+      leadFormUrl = lead.url || ''
+      leadForm = `Lead Form Title: ${leadFormTitle || 'None'}\nLead Form URL: ${leadFormUrl || 'None'}`
+    }
+
     // Final response
     res.setHeader('Content-Type', 'application/json')
     return res.status(200).send(JSON.stringify({
@@ -661,21 +660,22 @@ ${corpus}
       ownerDemographic,
       productsAndServices,
 
-      hoursOfOperation, // one line per day or "None"
-
-      addresses: ensureHeaderBlocks(addressesBlock), // includes USA + blank line between
-      phoneNumbers: ensureHeaderBlocks(phoneNumbers), // one per row
-      emailAddresses: ensureHeaderBlocks(emailAddresses), // one per row
-      socialMediaUrls: ensureHeaderBlocks(socialMediaUrls), // one per row (canonicalized)
+      hoursOfOperation,
+      addresses: ensureHeaderBlocks(addresses.length ? addresses.join('\n\n') : 'None'),
+      phoneNumbers: ensureHeaderBlocks(phones.length ? phones.join('\n') : 'None'),
+      emailAddresses: ensureHeaderBlocks(emails.length ? emails.join('\n') : 'None'),
+      socialMediaUrls: ensureHeaderBlocks(socialFound.length ? socialFound.join('\n') : 'None'),
 
       licenseNumbers: ensureHeaderBlocks(licenseNumbers),
       methodsOfPayment,
-      bbbSeal: bbbSealPlain, // plain text
+      bbbSeal: bbbSealPlain,
       serviceArea,
       refundAndExchangePolicy,
 
-      // New Data Point #15
-      leadForm: leadForm // either "Lead Form Title: ...\nLead Form URL: ..." or "None"
+      // Lead form fields for UI flexibility
+      leadForm,
+      leadFormTitle,
+      leadFormUrl
     }))
 
   } catch (err) {
