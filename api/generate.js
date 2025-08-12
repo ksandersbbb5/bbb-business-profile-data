@@ -451,7 +451,8 @@ IMPORTANT: Ensure all outputs are factual, neutral, and comply with the data poi
       paymentMethods
     }))
   } catch (err) {
-    const code = err.statusCode || 500
-    return res.status(code).send(err.message || 'Internal Server Error')
-  }
+  console.error('API ERROR:', err, err.stack)   // <--- THIS IS NEW
+  const code = err.statusCode || 500
+  return res.status(code).send(err.message || 'Internal Server Error')
 }
+
