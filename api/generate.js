@@ -97,7 +97,6 @@ async function crawl(rootUrl) {
     } catch {}
   }
 
-  // Always fetch these slugs, even if content is not thin
   for (const slug of ALWAYS_SLUGS) {
     try {
       const extra = new URL(slug, rootUrl).href
@@ -182,49 +181,7 @@ function harvestFromJsonLd(pages) {
   return out
 }
 
-function normalizeAddressBreaks(text) {
-  return text
-    .replace(/(\d{1,6})\s*\n\s*([A-Za-z])/g, '$1 $2')
-    .replace(/(\bSuite|Ste|#|Unit)\s*\n\s*/gi, '$1 ')
-    .replace(/,\s*\n\s*/g, ', ')
-    .replace(/\|\s*/g, ' ')
-}
-const STREET_TYPES = [
-  'Street','St','Avenue','Ave','Road','Rd','Boulevard','Blvd','Drive','Dr',
-  'Lane','Ln','Court','Ct','Place','Pl','Parkway','Pkwy','Highway','Hwy',
-  'Way','Terrace','Terr','Circle','Cir','Pike'
-]
-const STREET_TYPES_RE = new RegExp(`\\b(?:${STREET_TYPES.join('|')})\\b`, 'i')
-const NAV_WORDS_RE = /\b(Home|About|Services|Contact|Reviews|Specials|Privacy|Terms|COVID|Update|Name:|Email:|Phone:|Menu|All rights reserved)\b/i
-
-function extractAddresses(rawText) {
-  const text = normalizeAddressBreaks(rawText)
-  const re = new RegExp(
-    String.raw`(^|\n)\s*` +
-    String.raw`(\d{1,6}\s+[A-Za-z0-9.\-# ]+?)\s+` +
-    String.raw`(?:${STREET_TYPES.join('|')})` +
-    String.raw`(?:\s*,?\s*(?:Suite|Ste|Unit|#)\s*\w+)?` +
-    String.raw`\s*[\n,]\s*` +
-    String.raw`([A-Za-z][A-Za-z\s\.'-]+),?\s*([A-Z]{2})\s*(\d{5}(?:-\d{4})?)`
-  , 'gi')
-  const out = []
-  let m
-  while ((m = re.exec(text))) {
-    let street = (m[2] || '').replace(/\s{2,}/g, ' ').trim()
-    const city = (m[3] || '').replace(/\s{2,}/g, ' ').trim()
-    const state = (m[4] || '').trim()
-    const zip = (m[5] || '').trim()
-    if (!street || !STREET_TYPES_RE.test(street)) continue
-    if (NAV_WORDS_RE.test(street)) continue
-    const letters = (street.match(/[A-Za-z]/g) || []).length
-    if (letters < 3) continue
-    street = street.replace(/\s+(Suite|Ste|Unit|#)\s*/i, ', $1 ')
-    out.push(`${street}\n${city}, ${state} ${zip}\nUSA`)
-  }
-  return uniq(out)
-}
-
-// ====== Fallback address/hours from all pages ======
+// Extract fallback address/hours from ALL pages (deep fallback for image-heavy/JS sites)
 function extractAddressesFromPages(pages) {
   const found = []
   for (const { html } of pages) {
@@ -237,13 +194,13 @@ function extractAddressesFromPages(pages) {
         let candidate = [txt, next].filter(Boolean).join('\n')
         if (candidate.match(/\d{5}/)) found.push(candidate)
       }
+      // Try extracting with regex anyway
       const addr = extractAddresses(txt)
       if (addr.length) found.push(...addr)
     })
   }
   return uniq(found)
 }
-
 function extractHoursFromPages(pages) {
   const found = []
   for (const { html } of pages) {
@@ -271,12 +228,10 @@ function extractHoursFromPages(pages) {
   return uniq(found)
 }
 
-// ====== Email ======
+// Emails, Phones
 function extractEmails(text) {
   return uniq(text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [])
 }
-
-// ====== Phones ======
 function isValidNanp(area, exch, line) {
   return /^[2-9]\d{2}$/.test(area) && /^[2-9]\d{2}$/.test(exch) && /^\d{4}$/.test(line)
 }
@@ -294,20 +249,16 @@ function extractPhones(text) {
   return uniq(out)
 }
 
-// ====== Social, BBB, lead form, etc — Use your same logic ======
-// -- [Place all your old socialFound, bbbSeal, lead form, model call, output format logic here] --
-
-// ... for brevity, keeping those as-is! (You can copy them directly from your last working file.)
-
-// ====== Handler ======
+// ========== Handler ==============
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end()
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
-  const start = Date.now()
+
   try {
     const body = await readJsonBody(req)
     const { url } = body || {}
     if (!url) return res.status(400).send('Missing url')
+
     let parsed
     try {
       parsed = new URL(url)
@@ -315,18 +266,21 @@ export default async function handler(req, res) {
     } catch {
       return res.status(400).send('Please enter a valid URL.')
     }
+
+    // ==== Crawl and Extraction ====
     const { corpus, pages } = await crawl(parsed.href)
     const harvested = harvestFromJsonLd(pages)
 
-    // ===== PATCH: fallback for addresses & hours =====
+    // PATCHED: fallback for addresses/hours
     let addresses = uniq([
       ...(harvested.addresses || []),
       ...(extractAddresses(corpus) || []),
       ...(extractAddressesFromPages(pages) || [])
     ])
+    let addressesBlock = addresses.length ? addresses.join('\n\n') : 'None'
+
     let hoursText = ''
     let hoursMap = harvested.hoursMap || {}
-    // If model/hoursMap has all 7, use it, else fallback to text
     if (Object.keys(hoursMap).length === 7) {
       hoursText = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
         .map(d => hoursMap[d] || `${d}: Closed`).join('\n')
@@ -337,7 +291,6 @@ export default async function handler(req, res) {
         ...(corpus.match(/(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[^.\n]{0,80}\d{1,2}(:\d{2})?\s?(?:AM|PM)[^.\n]{0,80}/gi) || [])
       ]
       if (allHours.length >= 7) {
-        // try to order by day
         let normed = []
         for (const d of ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']) {
           let found = allHours.find(h => h.toLowerCase().startsWith(d.toLowerCase()))
@@ -349,31 +302,24 @@ export default async function handler(req, res) {
       }
     }
 
-    // All your other fields: phones, emails, socials, lead form etc.
     const emails = extractEmails(corpus)
     const phones = uniq([
       ...extractPhones(corpus),
       ...extractPhones((harvested.phones || []).join(' '))
     ])
-    const socialMediaUrls = 'None' // [same as your previous logic — skipped for brevity]
-    const bbbSealPlain = 'None' // [same as your previous logic — skipped for brevity]
+    const phoneNumbers = phones.length ? phones.join('\n') : 'None'
+    const emailAddresses = emails.length ? emails.join('\n') : 'None'
 
-    // ...all other extraction goes here...
-    // For brevity, keep the rest of your last working handler output (OpenAI call, payload cleaning, output JSON)
-
-    // Add detailed error logging
+    // Minimal working output for debug
     res.setHeader('Content-Type', 'application/json')
-    // Compose your final JSON output, as in your previous handler!
-    // For brevity, use your most recent output block logic here
     return res.status(200).send(JSON.stringify({
-      url: parsed.href,
-      // timeTaken, all extracted fields...
-      // description, productsAndServices, ownerDemographic, etc.
-      // hoursOfOperation: hoursText,
-      // addresses: ensureHeaderBlocks(addresses.join('\n\n') || 'None'),
-      // ...rest...
+      websiteUrl: parsed.href,
+      hoursOfOperation: hoursText,
+      addresses: ensureHeaderBlocks(addressesBlock),
+      phoneNumbers,
+      emailAddresses,
+      // Add your remaining output fields here, as needed.
     }))
-
   } catch (err) {
     console.error("GENERATOR ERROR:", err)
     const code = err.statusCode || 500
