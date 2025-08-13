@@ -59,18 +59,14 @@ function extractJsonLd(html) {
   return blocks
 }
 
+// ====== PATCHED: Crawl only homepage and level 1 pages ======
 async function crawl(rootUrl) {
   const start = new URL(rootUrl)
   const visited = new Set()
   const queue = [start.href]
   const texts = []
   const htmls = []
-
-  const MAX_PAGES = 30
-  const FALLBACK_SLUGS = [
-    '/about', '/about-us', '/contact', '/contact-us', '/locations', '/hours',
-    '/menu', '/privacy', '/legal', '/store-locator', '/find-us', '/reservation', '/book'
-  ]
+  const MAX_PAGES = 20
 
   while (queue.length && htmls.length < MAX_PAGES) {
     const current = queue.shift()
@@ -88,29 +84,15 @@ async function crawl(rootUrl) {
           if (!href) return
           const abs = new URL(href, current)
           if (!sameOrigin(start, abs)) return
-          if (pathLevel(abs) <= 2) {
-            if (!visited.has(abs.href) && !queue.includes(abs.href) && htmls.length + queue.length < MAX_PAGES) {
-              queue.push(abs.href)
-            }
+          // Only keep home (0) and level 1 (1) pages, e.g. /about/, /contact-us/
+          const segs = abs.pathname.split('/').filter(Boolean)
+          if (segs.length > 1) return
+          if (!visited.has(abs.href) && !queue.includes(abs.href) && htmls.length + queue.length < MAX_PAGES) {
+            queue.push(abs.href)
           }
         } catch {}
       })
     } catch {}
-  }
-
-  // If corpus looks thin, try some common slugs
-  if (texts.join('\n\n').length < 200) {
-    for (const slug of FALLBACK_SLUGS) {
-      try {
-        const extra = new URL(slug, rootUrl).href
-        if (visited.has(extra)) continue
-        const html = await fetchHtml(extra)
-        htmls.push({ url: extra, html, jsonld: extractJsonLd(html) })
-        const text = extractVisibleText(html)
-        if (text) texts.push(text)
-      } catch {}
-      if (htmls.length >= MAX_PAGES) break
-    }
   }
 
   return { corpus: texts.join('\n\n'), pages: htmls }
@@ -122,45 +104,9 @@ function ensureHeaderBlocks(str) {
   return String(str || '')
     .replace(/\r/g, '')
     .replace(/\n{3,}/g, '\n\n')
-    .replace(/([^\n])(\nLicense Number: )/g, '$1\n\n$2')
+    .replace(/([^\n])(\nLicense Number: )/g, '$1\n\n$2') // Ensure blank line before each license number
+    .replace(/(Expiration Date: .*)\n(?!\n|$)/g, '$1\n\n') // Blank line after each Expiration Date
     .trim()
-}
-
-// ====== PATCH: Deep scan contact/about/location pages for addresses ======
-function extractAddressesFromPages(pages) {
-  const candidates = []
-  for (const { url, html } of pages) {
-    if (!/contact|about|location|find/i.test(url)) continue
-    const $ = cheerio.load(html)
-    $('body').find('p, div, span, address, li').each((_, el) => {
-      const t = $(el).text().replace(/\s{2,}/g, ' ').trim()
-      if (
-        /\d{1,6}.+?(Street|St|Ave|Avenue|Rd|Road|Blvd|Boulevard|Drive|Dr|Ln|Lane|Ct|Court|Pl|Place|Pkwy|Parkway|Hwy|Highway|Way|Terrace|Terr|Circle|Cir|Pike)/i.test(t) &&
-        /[A-Z]{2}\s?\d{5}/.test(t)
-      ) {
-        candidates.push(t)
-      }
-    })
-  }
-  return uniq(candidates)
-}
-
-// ====== PATCH: Deep scan contact/about/location pages for hours ======
-function extractHoursFromPages(pages) {
-  const out = []
-  for (const { url, html } of pages) {
-    if (!/contact|about|location|find|hours/i.test(url)) continue
-    const $ = cheerio.load(html)
-    const txt = $('body').text()
-    const lines = txt.split('\n').map(l => l.trim())
-    for (const line of lines) {
-      if (/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[:\s]/i.test(line) && /\d{1,2}(:\d{2})?\s?(AM|PM)/i.test(line)) {
-        out.push(line)
-      }
-    }
-  }
-  if (out.length >= 5) return out.join('\n')
-  return out
 }
 
 // ====== JSON-LD harvesters ======
@@ -262,7 +208,7 @@ function extractPhones(text) {
   return uniq(out)
 }
 
-// ====== Addresses (regex) ======
+// ====== Addresses ======
 function normalizeAddressBreaks(text) {
   return text
     .replace(/(\d{1,6})\s*\n\s*([A-Za-z])/g, '$1 $2')
@@ -443,13 +389,25 @@ function normalizeHoursFromCorpus(corpus) {
   if (lines.every(Boolean)) return lines.join('\n')
   return 'None'
 }
-function fixHoursFormatting(modelHours, corpus, jsonldHoursMap, fallbackHoursText) {
+function fixHoursFormatting(modelHours, corpus, jsonldHoursMap) {
   if (jsonldHoursMap && Object.keys(jsonldHoursMap).length === 7) {
     return FULL_DAYS.map(d => jsonldHoursMap[d] || `${d}: Closed`).join('\n')
   }
-  if (modelHours && modelHours !== 'None') return modelHours
-  if (fallbackHoursText && fallbackHoursText !== 'None') return fallbackHoursText
-  return normalizeHoursFromCorpus(corpus)
+  if (!modelHours || modelHours === 'None') return normalizeHoursFromCorpus(corpus)
+  let s = String(modelHours).replace(/\r/g, '').trim()
+  s = s.replace(/\s*(Monday:)/g, '\n$1')
+       .replace(/\s*(Tuesday:)/g, '\n$1')
+       .replace(/\s*(Wednesday:)/g, '\n$1')
+       .replace(/\s*(Thursday:)/g, '\n$1')
+       .replace(/\s*(Friday:)/g, '\n$1')
+       .replace(/\s*(Saturday:)/g, '\n$1')
+       .replace(/\s*(Sunday:)/g, '\n$1')
+       .trim()
+  const lines = s.split(/\n+/).map(x => x.trim()).filter(Boolean)
+  const re = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday):\s*(?:Closed|(\d{2}:\d{2}\s(?:AM|PM))\s-\s(\d{2}:\d{2}\s(?:AM|PM)))$/
+  const ok = FULL_DAYS.every(day => lines.some(l => re.test(l) && l.startsWith(day + ':')))
+  if (!ok) return normalizeHoursFromCorpus(corpus)
+  return lines.join('\n')
 }
 
 // ====== Lead Form detection ======
@@ -500,6 +458,7 @@ function detectLeadForm(pages, originUrl) {
     return hasField
   }
 
+  // prefer labels that look like CTAs
   candidates.sort((a, b) => {
     const aScore = TITLE_HINT.test(a.label) ? 1 : 0
     const bScore = TITLE_HINT.test(b.label) ? 1 : 0
@@ -601,34 +560,18 @@ export default async function handler(req, res) {
       return res.status(400).send('Please enter a valid URL.')
     }
 
-    // Crawl site (home + depth 2 + fallbacks)
+    // Crawl site (home + level 1 only)
     const { corpus, pages } = await crawl(parsed.href)
 
     // JSON-LD harvest (phones, addresses, hours, socials)
     const harvested = harvestFromJsonLd(pages)
 
-    // PATCH: Use all possible sources for addresses/hours
-    let addresses = uniq([
-      ...(harvested.addresses || []),
-      ...(extractAddresses(corpus) || []),
-      ...(extractAddressesFromPages(pages) || [])
-    ])
-    let addressesBlock = addresses.length ? addresses.join('\n\n') : 'None'
-
-    let hoursCandidates = [
-      ...(Object.values(harvested.hoursMap) || []),
-      ...(Array.isArray(extractHoursFromPages(pages)) ? extractHoursFromPages(pages) : [extractHoursFromPages(pages)]),
-      ...(corpus.match(/(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)[^.\n]{0,80}\d{1,2}(:\d{2})?\s?(?:AM|PM)[^.\n]{0,80}/gi) || [])
-    ]
-    hoursCandidates = uniq(hoursCandidates.flat().filter(Boolean))
-    let hoursText = 'None'
-    if (hoursCandidates.length >= 6) {
-      hoursText = hoursCandidates.join('\n')
-    }
-
     // Deterministic fields from free text
     const emails = extractEmails(corpus)
     const phones = uniq([...extractPhones(corpus), ...extractPhones(harvested.phones.join(' '))])
+    const addressesText = extractAddresses(corpus)
+    const addressesJsonLd = harvested.addresses || []
+    const addresses = uniq([...(addressesJsonLd || []), ...(addressesText || [])])
 
     const socialFound = uniq([
       ...(extractSocialFromPages(pages) || []),
@@ -663,6 +606,7 @@ export default async function handler(req, res) {
 
     const emailAddresses = emails.length ? emails.join('\n') : 'None'
     const phoneNumbers = phones.length ? phones.join('\n') : 'None'
+    const addressesBlock = addresses.length ? addresses.join('\n\n') : 'None'
     const socialMediaUrls = socialFound.length ? socialFound.join('\n') : 'None'
     const bbbSealPlain = bbbFound
       ? 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
@@ -745,6 +689,7 @@ WEBSITE CONTENT (verbatim):
 ${corpus}
 `
 
+    // If extremely thin but we have JSON-LD, still call the model
     if (!corpus || corpus.length < 40) {
       const hasStructured = (harvested.phones.length + harvested.addresses.length + Object.keys(harvested.hoursMap).length + harvested.socials.length) > 0
       if (!hasStructured) {
@@ -794,8 +739,8 @@ ${corpus}
       productsAndServices = uniq(items).join(', ')
     }
 
-    // Hours (prefer JSON-LD if complete, else fallback to our patched deep extraction)
-    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus, harvested.hoursMap, hoursText)
+    // Hours (prefer JSON-LD if complete)
+    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus, harvested.hoursMap)
 
     // Licenses (ensure labels; blank line between blocks)
     let licenseNumbers = String(payload.licenseNumbers || 'None') || 'None'
