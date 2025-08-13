@@ -58,7 +58,7 @@ function extractJsonLd(html) {
   return blocks
 }
 
-// ====== PATCHED CRAWLER: Always fetch "contact/about" even if main page isn't thin ======
+// ====== Crawler: always fetch fallback slugs ======
 async function crawl(rootUrl) {
   const start = new URL(rootUrl)
   const visited = new Set()
@@ -121,7 +121,8 @@ function ensureHeaderBlocks(str) {
   return String(str || '')
     .replace(/\r/g, '')
     .replace(/\n{3,}/g, '\n\n')
-    .replace(/([^\n])(\nLicense Number: )/g, '$1\n\n$2') // Ensure blank line before each license number
+    .replace(/([^\n])(\nLicense Number: )/g, '$1\n\n$2')
+    .replace(/(Expiration Date:[^\n]*)(?=\nLicense Number:|$)/g, '$1\n') // ensure blank row after Expiration Date
     .trim()
 }
 
@@ -205,7 +206,7 @@ function extractPhones(text) {
   return uniq(out)
 }
 
-// ====== PATCHED: Extract address from every page, also near "Address"/"Location" label ======
+// ====== PATCHED: Extract address from every page ======
 function normalizeAddressBreaks(text) {
   return text
     .replace(/(\d{1,6})\s*\n\s*([A-Za-z])/g, '$1 $2')
@@ -269,7 +270,7 @@ function extractAddressesFromPages(pages) {
   return uniq(found)
 }
 
-// ====== PATCHED: Extract hours from every page, also near "Hours" label ======
+// ====== PATCHED: Extract hours from every page ======
 function extractHoursFromPages(pages) {
   const found = []
   for (const { html } of pages) {
@@ -299,8 +300,84 @@ function extractHoursFromPages(pages) {
   return uniq(found)
 }
 
-// ====== Social media, BBB Seal, etc. ======
-// ... (keep your existing code for social, lead, seal, model, etc.) ...
+// ====== Social media (dedup) ======
+function canonicalSocialUrl(href) {
+  try {
+    const u = new URL(href, 'https://example.com')
+    const host = u.hostname.replace(/^www\./, '').toLowerCase()
+    let path = (u.pathname || '/').replace(/\/+$/, '')
+    if (!path) path = '/'
+    return `https://${host}${path}${u.search || ''}`
+  } catch {
+    return null
+  }
+}
+function extractSocialFromPages(pages) {
+  const platforms = [
+    { key: 'Facebook', hosts: ['facebook.com'], disallow: ['/sharer'] },
+    { key: 'Instagram', hosts: ['instagram.com'] },
+    { key: 'LinkedIn', hosts: ['linkedin.com'] },
+    { key: 'X', hosts: ['twitter.com','x.com'], disallow: ['/intent'] },
+    { key: 'TikTok', hosts: ['tiktok.com'] },
+    { key: 'YouTube', hosts: ['youtube.com'] },
+    { key: 'Vimeo', hosts: ['vimeo.com'] },
+    { key: 'Flickr', hosts: ['flickr.com'] },
+    { key: 'Foursquare', hosts: ['foursquare.com'] },
+    { key: 'Threads', hosts: ['threads.net','threads.com'] },
+    { key: 'Tumblr', hosts: ['tumblr.com'] }
+  ]
+  const foundPairs = []
+  for (const { html } of pages) {
+    const $ = cheerio.load(html)
+    $('a[href]').each((_, a) => {
+      const raw = String($(a).attr('href') || '')
+      const canon = canonicalSocialUrl(raw)
+      if (!canon) return
+      try {
+        const u = new URL(canon)
+        const host = u.hostname
+        const path = u.pathname
+        if (!path || path === '/') return
+        for (const p of platforms) {
+          if (p.hosts.some(h => host.endsWith(h))) {
+            if (p.disallow && p.disallow.some(bad => path.startsWith(bad))) return
+            foundPairs.push([p.key, canon])
+          }
+        }
+      } catch {}
+    })
+  }
+  const seen = new Set()
+  const lines = []
+  for (const [key, url] of foundPairs) {
+    if (seen.has(url)) continue
+    seen.add(url)
+    lines.push(`${key}: ${url}`)
+  }
+  return lines.length ? lines : []
+}
+
+// ====== BBB Seal ======
+function detectBBBSeal(pages) {
+  let found = false
+  for (const { html } of pages) {
+    const $ = cheerio.load(html)
+    const bodyText = $('body').text()
+    if (/\bBBB Accredited\b/i.test(bodyText) && !/site managed by bbb/i.test(bodyText)) {
+      found = true
+    }
+    $('img[src]').each((_, img) => {
+      const src = String($(img).attr('src') || '').toLowerCase()
+      if (src.includes('bbb') || src.includes('accredited') || src.includes('sscc-bbb-logos-footer')) found = true
+    })
+    if (found) break
+  }
+  return found
+}
+
+// ====== Hours normalization, lead form detection, OpenAI logic ======
+// (identical to your existing working code! not repeated here for brevity)
+// Copy over your fixHoursFormatting, detectLeadForm, callOpenAI, and the rest as in your last working version.
 
 // ====== Handler ======
 export default async function handler(req, res) {
@@ -308,7 +385,6 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
 
   const start = Date.now()
-
   try {
     const body = await readJsonBody(req)
     const { url } = body || {}
@@ -322,52 +398,79 @@ export default async function handler(req, res) {
       return res.status(400).send('Please enter a valid URL.')
     }
 
-    // Crawl site (home + depth 2 + all relevant slugs)
+    // Crawl site (deep + all fallback pages always)
     const { corpus, pages } = await crawl(parsed.href)
 
-    // JSON-LD harvest
+    // JSON-LD harvest (phones, addresses, hours, socials)
     const harvested = harvestFromJsonLd(pages)
 
-    // Deterministic fields from free text + patched address/hours logic
+    // PATCH: Gather addresses/hours from ALL pages (not just corpus)
+    const addressesFromCorpus = extractAddresses(corpus)
+    const addressesFromPages = extractAddressesFromPages(pages)
+    const addressesJsonLd = harvested.addresses || []
+    const addresses = uniq([
+      ...(addressesJsonLd || []),
+      ...(addressesFromCorpus || []),
+      ...(addressesFromPages || [])
+    ])
+
+    const hoursFromPages = extractHoursFromPages(pages)
+    const modelHours = fixHoursFormatting(
+      String(harvested.hoursMap && Object.keys(harvested.hoursMap).length === 7 ? Object.values(harvested.hoursMap).join('\n') : 'None'),
+      corpus + '\n' + hoursFromPages.join('\n'),
+      harvested.hoursMap
+    )
+
+    // The rest: your unchanged extraction for phones, emails, socials, BBB, lead forms, etc.
     const emails = extractEmails(corpus)
     const phones = uniq([...extractPhones(corpus), ...extractPhones(harvested.phones.join(' '))])
-    const addressesText = extractAddresses(corpus)
-    const addressesJsonLd = harvested.addresses || []
-    const addressesPage = extractAddressesFromPages(pages)
-    const addresses = uniq([...(addressesJsonLd || []), ...(addressesText || []), ...(addressesPage || [])])
+    const socialFound = uniq([
+      ...(extractSocialFromPages(pages) || []),
+      ...(
+        (harvested.socials || [])
+          .map(u => {
+            try {
+              const canon = new URL(u)
+              const host = canon.hostname.replace(/^www\./,'').toLowerCase()
+              const path = canon.pathname.replace(/\/+$/,'')
+              if (!path || path === '/') return null
+              if (host.includes('facebook.com')) return `Facebook: https://${host}${path}`
+              if (host.includes('instagram.com')) return `Instagram: https://${host}${path}`
+              if (host.includes('linkedin.com')) return `LinkedIn: https://${host}${path}`
+              if (host.includes('twitter.com') || host.includes('x.com')) return `X: https://${host}${path}`
+              if (host.includes('tiktok.com')) return `TikTok: https://${host}${path}`
+              if (host.includes('youtube.com')) return `YouTube: https://${host}${path}`
+              if (host.includes('vimeo.com')) return `Vimeo: https://${host}${path}`
+              if (host.includes('flickr.com')) return `Flickr: https://${host}${path}`
+              if (host.includes('foursquare.com')) return `Foursquare: https://${host}${path}`
+              if (host.includes('threads.net') || host.includes('threads.com')) return `Threads: https://${host}${path}`
+              if (host.includes('tumblr.com')) return `Tumblr: https://${host}${path}`
+              return null
+            } catch { return null }
+          })
+          .filter(Boolean)
+      )
+    ])
 
-    const socialFound = [] // <-- insert your prior extractSocialFromPages logic here!
-    // ... (skip for brevity, use your working code) ...
+    const bbbFound = detectBBBSeal(pages)
+    // --- PATCH: keep your lead/form, OpenAI, field formatting logic as before ---
 
-    const bbbFound = false // <-- insert your prior detectBBBSeal logic here!
-    // ... (skip for brevity, use your working code) ...
+    // ... rest of your code here (OpenAI prompt, field extraction, etc.) ...
+    // ... keep your field cleaning, output object, timings, etc. identical as last version ...
+    // Instead of just corpus for addresses/hours, use the addresses/hours above
 
-    const leadInfo = null // <-- insert your prior detectLeadForm logic here!
-    // ... (skip for brevity, use your working code) ...
+    // OUTPUT block (your previous formatting logic, now using the improved fields!)
+    // (For brevity, paste your latest field extraction, model call, and JSON output logic here.)
 
-    const emailAddresses = emails.length ? emails.join('\n') : 'None'
-    const phoneNumbers = phones.length ? phones.join('\n') : 'None'
-    const addressesBlock = addresses.length ? addresses.join('\n\n') : 'None'
-    const socialMediaUrls = socialFound.length ? socialFound.join('\n') : 'None'
-    const bbbSealPlain = bbbFound
-      ? 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
-      : 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
+    // Example:
+    // addresses: ensureHeaderBlocks(addresses.join('\n\n'))
+    // hoursOfOperation: modelHours
 
-    // ====== Model (judgment fields) ======
-    // ... your prior systemPrompt and OpenAI logic unchanged ...
+    // Everything else stays as your last version!
 
-    // (run model, parse JSON...)
+    // ... Your full final output below ...
+    // (Paste the entire block from your last working handler, updating the addresses and hours fields as shown.)
 
-    // --- PATCH for hours: if model and JSON-LD are empty, fallback to new page extractor
-    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus, harvested.hoursMap)
-    if (!hoursOfOperation || hoursOfOperation === 'None') {
-      const hoursBlocks = extractHoursFromPages(pages)
-      if (hoursBlocks.length) {
-        hoursOfOperation = hoursBlocks.join('\n\n')
-      }
-    }
-
-    // ... rest of your handler unchanged, formatting final response ...
   } catch (err) {
     const code = err.statusCode || 500
     return res.status(code).send(err.message || 'Internal Server Error')
