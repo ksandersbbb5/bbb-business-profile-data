@@ -310,14 +310,9 @@ function extractSocialFromPages(pages) {
 }
 
 // ====== BBB Seal ======
-// PATCH: Also consider "seal-boston.bbb.org/badge/badge.min.js" in HTML as found
 function detectBBBSeal(pages) {
   let found = false
   for (const { html } of pages) {
-    // Check for badge JS in raw HTML
-    if (html.includes('seal-boston.bbb.org/badge/badge.min.js')) {
-      found = true
-    }
     const $ = cheerio.load(html)
     const bodyText = $('body').text()
     if (/\bBBB Accredited\b/i.test(bodyText) && !/site managed by bbb/i.test(bodyText)) {
@@ -416,13 +411,412 @@ function fixHoursFormatting(modelHours, corpus, jsonldHoursMap) {
 }
 
 // ====== Lead Form detection ======
-// ...unchanged...
+function detectLeadForm(pages, originUrl) {
+  const start = new URL(originUrl)
+  const domByUrl = new Map(pages.map(p => [p.url, cheerio.load(p.html)]))
+
+  const INTENT = /(quote|estimate|consult|consultation|request|schedule|book|appointment|service|contact|reserve|reservation|table)/i
+  const TITLE_HINT = /(get a quote|request service|schedule a consultation|book now|book a table|make a reservation|reserve|reservation|table|book)/i
+
+  const candidates = []
+  for (const { url, html } of pages) {
+    const $ = cheerio.load(html)
+    $('a[href], button[onclick]').each((_, el) => {
+      let href = $(el).attr('href') || ''
+      const txt = ($(el).text() || '').trim()
+      const aria = ($(el).attr('aria-label') || '').trim()
+      const title = ($(el).attr('title') || '').trim()
+      const label = `${txt} ${aria} ${title}`.trim()
+
+      if (!INTENT.test(label)) return
+      if (!href) return
+      try {
+        const abs = new URL(href, url)
+        if (abs.origin !== start.origin) return
+        if (abs.pathname === '/' || abs.hash === '#') return
+        candidates.push({ label, target: abs.href })
+      } catch {}
+    })
+  }
+
+  const FIELD_RE = /(name|email|phone|message|address)/i
+  function pageHasRealForm(u) {
+    const $ = domByUrl.get(u)
+    if (!$) return false
+    const forms = $('form')
+    if (!forms.length) return false
+    let hasField = false
+    forms.each((_, f) => {
+      const ff = $(f)
+      if (ff.find('input, textarea, select').filter((_, i) => {
+        const nm = ($(i).attr('name') || '').toLowerCase()
+        const pl = ($(i).attr('placeholder') || '').toLowerCase()
+        const lbFor = $(`label[for="${$(i).attr('id') || ''}"]`).text().toLowerCase()
+        return FIELD_RE.test(nm) || FIELD_RE.test(pl) || FIELD_RE.test(lbFor)
+      }).length) hasField = true
+    })
+    return hasField
+  }
+
+  // prefer labels that look like CTAs
+  candidates.sort((a, b) => {
+    const aScore = TITLE_HINT.test(a.label) ? 1 : 0
+    const bScore = TITLE_HINT.test(b.label) ? 1 : 0
+    if (aScore !== bScore) return bScore - aScore
+    const ap = new URL(a.target).pathname.split('/').filter(Boolean).length
+    const bp = new URL(b.target).pathname.split('/').filter(Boolean).length
+    return bp - ap
+  })
+
+  for (const c of candidates) {
+    if (pageHasRealForm(c.target)) {
+      const title = c.label.replace(/\s+/g, ' ').replace(/\s*\|\s*/g, ' ').trim()
+      return { title, url: c.target }
+    }
+  }
+  return null
+}
 
 // ====== Model Call ======
-// ...unchanged...
+async function callOpenAI(systemPrompt, userPrompt) {
+  if (!OPENAI_API_KEY) {
+    const err = new Error('Missing OPENAI_API_KEY')
+    err.statusCode = 500
+    throw err
+  }
+  const body = {
+    model: MODEL,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    temperature: 0.1
+  }
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENAI_API_KEY}`
+    },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) {
+    const errText = await res.text()
+    const err = new Error(`OpenAI error: ${res.status} ${errText}`)
+    err.statusCode = res.status
+    throw err
+  }
+  const data = await res.json()
+  return data.choices?.[0]?.message?.content || ''
+}
 
 // ====== Enforcers & cleaners ======
-// ...unchanged...
+const ALLOWED_CLIENT_BASE = new Set([
+  'residential',
+  'commercial',
+  'residential and commercial',
+  'government',
+  'non-profit'
+])
+function enforceClientBase(value) {
+  const v = (value || '').trim().toLowerCase()
+  return ALLOWED_CLIENT_BASE.has(v) ? v : 'residential'
+}
+
+const BANNED_PHRASES = [
+  'warranties','warranty','guarantee','guaranteed','quality','needs','free','reliable','premier','expert','experts','best','unique','peace of mind','largest','top','selection','ultimate','consultation','skilled','known for','prominent','paid out','commitment','Experts at','Experts in','Cost effective','cost saving','Ensuring efficiency','Best at','best in','Ensuring','Excels','Rely on us',
+  'trusted by','relied on by','endorsed by','preferred by','backed by',
+  'Free','Save','Best','New','Limited','Exclusive','Instant','Now','Proven','Sale','Bonus','Act Fast','Unlock'
+]
+function containsBanned(text) {
+  const lower = (text || '').toLowerCase()
+  return BANNED_PHRASES.some(p => lower.includes(p.toLowerCase()))
+}
+function sanitizeDescription(text) {
+  let t = (text || '').replace(/[\*\[\]]/g, '')
+  if (t.length > 900) t = t.slice(0, 900)
+  t = t.replace(/https?:\S+/g, '')
+  t = t.replace(/^\s*Business\s*Description\s*:?\s*/i, '')
+  return t.trim()
+}
 
 // ====== Handler ======
-// ...unchanged export default async function handler(req, res) { ... }
+export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') return res.status(204).end()
+  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed')
+
+  const start = Date.now()
+
+  try {
+    const body = await readJsonBody(req)
+    const { url } = body || {}
+    if (!url) return res.status(400).send('Missing url')
+
+    let parsed
+    try {
+      parsed = new URL(url)
+      if (!/^https?:$/.test(parsed.protocol)) throw new Error('bad protocol')
+    } catch {
+      return res.status(400).send('Please enter a valid URL.')
+    }
+
+    // Crawl site (home + level 1 only)
+    const { corpus, pages } = await crawl(parsed.href)
+
+    // JSON-LD harvest (phones, addresses, hours, socials)
+    const harvested = harvestFromJsonLd(pages)
+
+    // Deterministic fields from free text
+    const emails = extractEmails(corpus)
+    const phones = uniq([...extractPhones(corpus), ...extractPhones(harvested.phones.join(' '))])
+    const addressesText = extractAddresses(corpus)
+    const addressesJsonLd = harvested.addresses || []
+    const addresses = uniq([...(addressesJsonLd || []), ...(addressesText || [])])
+
+    const socialFound = uniq([
+      ...(extractSocialFromPages(pages) || []),
+      ...(
+        (harvested.socials || [])
+          .map(u => {
+            try {
+              const canon = new URL(u)
+              const host = canon.hostname.replace(/^www\./,'').toLowerCase()
+              const path = canon.pathname.replace(/\/+$/,'')
+              if (!path || path === '/') return null
+              if (host.includes('facebook.com')) return `Facebook: https://${host}${path}`
+              if (host.includes('instagram.com')) return `Instagram: https://${host}${path}`
+              if (host.includes('linkedin.com')) return `LinkedIn: https://${host}${path}`
+              if (host.includes('twitter.com') || host.includes('x.com')) return `X: https://${host}${path}`
+              if (host.includes('tiktok.com')) return `TikTok: https://${host}${path}`
+              if (host.includes('youtube.com')) return `YouTube: https://${host}${path}`
+              if (host.includes('vimeo.com')) return `Vimeo: https://${host}${path}`
+              if (host.includes('flickr.com')) return `Flickr: https://${host}${path}`
+              if (host.includes('foursquare.com')) return `Foursquare: https://${host}${path}`
+              if (host.includes('threads.net') || host.includes('threads.com')) return `Threads: https://${host}${path}`
+              if (host.includes('tumblr.com')) return `Tumblr: https://${host}${path}`
+              return null
+            } catch { return null }
+          })
+          .filter(Boolean)
+      )
+    ])
+
+    const bbbFound = detectBBBSeal(pages)
+    const leadInfo = detectLeadForm(pages, parsed.href)
+
+    const emailAddresses = emails.length ? emails.join('\n') : 'None'
+    const phoneNumbers = phones.length ? phones.join('\n') : 'None'
+    const addressesBlock = addresses.length ? addresses.join('\n\n') : 'None'
+    const socialMediaUrls = socialFound.length ? socialFound.join('\n') : 'None'
+    const bbbSealPlain = bbbFound
+      ? 'FOUND    It appears the BBB Accredited Business Seal IS on this website or the website uses the text BBB Accredited.'
+      : 'NOT FOUND    It appears the BBB Accredited Business Seal is NOT on this website.'
+
+    // ====== Model (judgment fields) ======
+    const systemPrompt = `You are a BBB representative enhancing a BBB Business Profile.
+
+INFORMATION SOURCE:
+Use ONLY the provided website content.
+
+EXCLUSIONS:
+- Do not reference other businesses in the industry.
+- Exclude owner names, locations, hours of operation, and time-related information (including start dates and time in business) unless the field specifically requests them.
+- Avoid the characters * [ ].
+- Do NOT include links to any websites.
+
+DO NOT INCLUDE:
+- The text “Business Description” or any variation.
+- The phrase “for more information visit their website at the provided URL” or any variation.
+- Promotional language of any kind, including the listed banned words/phrases.
+- Any wording implying trust/endorsement/popularity (e.g., "trusted by", "preferred by").
+
+GENERAL GUIDELINES:
+- Business Description: factual only, no advertising claims, no history or storytelling, <=900 characters.
+- If a requested field cannot be fully satisfied from the website content, return "None" (without quotes).
+
+BUSINESS DESCRIPTION TEMPLATE:
+"[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."
+
+PRODUCTS & SERVICES:
+- List as comma-separated categories, each item 1–4 words, each word capitalized. No bullets or numbering. No service areas. If none, "None".
+
+HOURS OF OPERATION:
+- MUST list all seven days in the exact format:
+Monday: 09:00 AM - 05:00 PM
+...
+Sunday: Closed
+- If the site does not provide all seven days, return "None". NEVER invent or infer.
+
+OWNER DEMOGRAPHIC:
+- Return exact match from the approved list or "None".
+
+LICENSE NUMBER(S):
+- For each license found, return exactly:
+License Number: <value or None>
+Issuing Authority: <value or None>
+License Type: <value or None>
+Status: <value or None>
+Expiration Date: <value or None>
+- Blank line between each license. If none, "None".
+
+METHODS OF PAYMENT:
+- Return comma-separated from this approved list only (case-sensitive format):
+ACH, Amazon Payments, American Express, Apple Pay, Balance Adjustment, Bitcoin, Cash, Certified Check, China UnionPay, Coupon, Credit Card, Debit Card, Discover, Electronic Check, Financing, Google Pay, Invoice, MasterCard, Masterpass, Money Order, PayPal, Samsung Pay, Store Card, Venmo, Visa, Western Union, Wire Transfer, Zelle
+- If none, "None".
+
+SERVICE AREA:
+- Geographic areas explicitly listed on the site. If none, "None".
+
+REFUND AND EXCHANGE POLICY:
+- Extract policy text if present. If none, "None".
+
+OUTPUT:
+Return strict JSON with keys (all strings):
+description
+clientBase
+ownerDemographic
+productsAndServices
+hoursOfOperation
+licenseNumbers
+methodsOfPayment
+serviceArea
+refundAndExchangePolicy
+Return ONLY JSON.`
+
+    const userPrompt = `Website URL: ${parsed.href}
+
+WEBSITE CONTENT (verbatim):
+${corpus}
+`
+
+    // If extremely thin but we have JSON-LD, still call the model
+    if (!corpus || corpus.length < 40) {
+      const hasStructured = (harvested.phones.length + harvested.addresses.length + Object.keys(harvested.hoursMap).length + harvested.socials.length) > 0
+      if (!hasStructured) {
+        return res.status(422).send('Could not extract enough content from the provided site.')
+      }
+    }
+
+    let aiRaw = await callOpenAI(systemPrompt, userPrompt)
+
+    let payload
+    try {
+      const jsonMatch = aiRaw.match(/\{[\s\S]*\}$/)
+      payload = JSON.parse(jsonMatch ? jsonMatch[0] : aiRaw)
+    } catch {
+      const fix = await callOpenAI(
+        'Return ONLY valid JSON with the exact keys requested. No commentary.',
+        `Convert to valid JSON:\n${aiRaw}`
+      )
+      payload = JSON.parse(fix)
+    }
+
+    const clientBase = enforceClientBase(String(payload.clientBase || 'residential'))
+
+    // Description: rewrite to exact template and append client base sentence
+    let desc0 = sanitizeDescription(String(payload.description || ''))
+    const descRewrite = await callOpenAI(
+      'Return ONLY the following text, <=900 chars, neutral tone, no promotional words, no links:\nTemplate: "[Company Name] provides [products/services offered], including [specific details about products/services]. The company assists clients with [details on the service process]."',
+      desc0
+    )
+    let description = sanitizeDescription(descRewrite || desc0)
+    if (!/[.!?]$/.test(description)) description += '.'
+    description += ` The business provides services to ${clientBase} customers.`
+    if (containsBanned(description)) {
+      for (const p of BANNED_PHRASES) {
+        const re = new RegExp(p, 'gi')
+        description = description.replace(re, '')
+      }
+      description = sanitizeDescription(description)
+    }
+
+    // Products & Services
+    let productsAndServices = String(payload.productsAndServices || 'None') || 'None'
+    if (productsAndServices !== 'None') {
+      const items = productsAndServices.split(',').map(s => s.trim()).filter(Boolean).map(s =>
+        s.split(/\s+/).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ')
+      )
+      productsAndServices = uniq(items).join(', ')
+    }
+
+    // Hours (prefer JSON-LD if complete)
+    let hoursOfOperation = fixHoursFormatting(String(payload.hoursOfOperation || 'None') || 'None', corpus, harvested.hoursMap)
+
+    // Licenses (ensure labels; blank line between blocks)
+    let licenseNumbers = String(payload.licenseNumbers || 'None') || 'None'
+    if (licenseNumbers !== 'None') {
+      const blocks = licenseNumbers
+        .split(/(?:\n\s*){2,}/)
+        .map(b => b.trim())
+        .filter(Boolean)
+        .map(b => {
+          const get = (label) => {
+            const m = b.match(new RegExp(`${label}:\\s*(.*)`, 'i'))
+            return (m && m[1] && m[1].trim()) || 'None'
+          }
+          return [
+            `License Number: ${get('License Number')}`,
+            `Issuing Authority: ${get('Issuing Authority')}`,
+            `License Type: ${get('License Type')}`,
+            `Status: ${get('Status')}`,
+            `Expiration Date: ${get('Expiration Date')}`,
+            '' // Blank row after each license
+          ].join('\n')
+        })
+      licenseNumbers = uniq(blocks).join('\n')
+    }
+
+    let ownerDemographic = String(payload.ownerDemographic || 'None') || 'None'
+    let methodsOfPayment = String(payload.methodsOfPayment || 'None') || 'None'
+    let serviceArea = String(payload.serviceArea || 'None') || 'None'
+    let refundAndExchangePolicy = String(payload.refundAndExchangePolicy || 'None') || 'None'
+
+    // Timing
+    const elapsed = Date.now() - start
+    const mins = Math.floor(elapsed / 60000)
+    const secs = Math.floor((elapsed % 60000) / 1000)
+    const timeTaken = `${mins} minute${mins === 1 ? '' : 's'} ${secs} second${secs === 1 ? '' : 's'}`
+
+    // Lead form (formatted)
+    let leadForm = 'None'
+    let leadFormTitle = ''
+    let leadFormUrl = ''
+    if (leadInfo) {
+      leadFormTitle = leadInfo.title || ''
+      leadFormUrl = leadInfo.url || ''
+      leadForm = `Lead Form Title: ${leadFormTitle || 'None'}\nLead Form URL: ${leadFormUrl || 'None'}`
+    }
+
+    // Final response
+    res.setHeader('Content-Type', 'application/json')
+    return res.status(200).send(JSON.stringify({
+      url: parsed.href,
+      timeTaken,
+
+      description,
+      clientBase,
+      ownerDemographic,
+      productsAndServices,
+
+      hoursOfOperation,
+      addresses: ensureHeaderBlocks(addressesBlock),
+      phoneNumbers: ensureHeaderBlocks(phoneNumbers),
+      emailAddresses: ensureHeaderBlocks(emailAddresses),
+      socialMediaUrls: ensureHeaderBlocks(socialMediaUrls),
+
+      licenseNumbers: ensureHeaderBlocks(licenseNumbers),
+      methodsOfPayment,
+      bbbSeal: bbbSealPlain,
+      serviceArea,
+      refundAndExchangePolicy,
+
+      leadForm,
+      leadFormTitle,
+      leadFormUrl
+    }))
+
+  } catch (err) {
+    const code = err.statusCode || 500
+    return res.status(code).send(err.message || 'Internal Server Error')
+  }
+}
