@@ -59,7 +59,7 @@ function extractJsonLd(html) {
   return blocks
 }
 
-// ====== PATCHED: Crawl only homepage and level 1 pages ======
+// ====== Crawl only homepage and level 1 pages ======
 async function crawl(rootUrl) {
   const start = new URL(rootUrl)
   const visited = new Set()
@@ -104,8 +104,8 @@ function ensureHeaderBlocks(str) {
   return String(str || '')
     .replace(/\r/g, '')
     .replace(/\n{3,}/g, '\n\n')
-    .replace(/([^\n])(\nLicense Number: )/g, '$1\n\n$2') // Ensure blank line before each license number
-    .replace(/(Expiration Date: .*)\n(?!\n|$)/g, '$1\n\n') // Blank line after each Expiration Date
+    .replace(/([^\n])(\nLicense Number: )/g, '$1\n\n$2')
+    .replace(/(Expiration Date: .*)\n(?!\n|$)/g, '$1\n\n')
     .trim()
 }
 
@@ -313,6 +313,10 @@ function extractSocialFromPages(pages) {
 function detectBBBSeal(pages) {
   let found = false
   for (const { html } of pages) {
+    // PATCH: check for badge script in HTML source
+    if (html.includes('seal-boston.bbb.org/badge/badge.min.js')) {
+      found = true
+    }
     const $ = cheerio.load(html)
     const bodyText = $('body').text()
     if (/\bBBB Accredited\b/i.test(bodyText) && !/site managed by bbb/i.test(bodyText)) {
@@ -669,6 +673,9 @@ SERVICE AREA:
 
 REFUND AND EXCHANGE POLICY:
 - Extract policy text if present. If none, "None".
+
+BBB SEAL ON WEBSITE:
+- If any page contains the string "seal-boston.bbb.org/badge/badge.min.js" in the HTML source, this means the BBB Seal was found.
 
 OUTPUT:
 Return strict JSON with keys (all strings):
